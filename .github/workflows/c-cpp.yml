@@ -108,12 +108,12 @@ jobs:
       - name: Build in ARM64 container
         if: steps.arch.outputs.arch == 'aarch64'
         run: |
-          # 创建容器内构建脚本
+          # 创建容器内构建脚本（添加 bzip2 以支持 .tar.bz2 解压）
           cat > build-in-container.sh << 'EOF'
           #!/bin/bash
           set -e
           apt update
-          apt install -y wget make g++ libboost-all-dev libssl-dev libssh2-1-dev libcurl4-openssl-dev
+          apt install -y wget make g++ libboost-all-dev libssl-dev libssh2-1-dev libcurl4-openssl-dev bzip2
           # 编译 wxWidgets（版本 3.1.5）
           wget -q https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.5/wxWidgets-3.1.5.tar.bz2
           tar -xf wxWidgets-3.1.5.tar.bz2
