@@ -18,8 +18,7 @@ on:
 
 env:
   FFS_VERSION: 14.7
-  # 如果 Resources.zip 缺失，从该版本下载（可修改为你的备用版本）
-  RESOURCES_FALLBACK_VERSION: 14.6
+  SOURCE_ZIP_PATH: FreeFileSync/FreeFileSync_14.7_Source.zip   # 仓库内源码压缩包路径
 
 jobs:
   ###########################################################################
@@ -32,35 +31,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare source code
+      - name: Extract source code
         run: |
-          # 如果存在源码压缩包则解压，否则直接使用 FreeFileSync/Source 作为源码根目录
-          if [ -f "FreeFileSync/Source/FreeFileSync/FreeFileSync_${FFS_VERSION}_Source.zip" ]; then
+          if [ -f "$SOURCE_ZIP_PATH" ]; then
             echo "Found source zip, extracting..."
-            unzip -q "FreeFileSync/Source/FreeFileSync/FreeFileSync_${FFS_VERSION}_Source.zip" -d ffs-source
-            mv ffs-source/FreeFileSync_*_Source ffs-source/FreeFileSync
-          elif [ -d "FreeFileSync/Source" ]; then
-            echo "Using existing source directory"
-            mkdir -p ffs-source
-            cp -r FreeFileSync/Source ffs-source/FreeFileSync
+            unzip -q "$SOURCE_ZIP_PATH" -d ffs-source-tmp
+            # 解压后通常得到 FreeFileSystem_14.7_Source 目录，将其重命名为 ffs-source
+            mv ffs-source-tmp/FreeFileSync_*_Source ffs-source
           else
-            echo "Cannot find FreeFileSync source in repository"
+            echo "Error: Source zip not found at $SOURCE_ZIP_PATH"
             exit 1
-          fi
-
-      - name: Ensure Resources.zip exists
-        run: |
-          if [ ! -f ffs-source/FreeFileSync/Build/Resources.zip ]; then
-            echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-            wget -q -O fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
-            unzip -q fallback.zip -d fallback
-            cp fallback/FreeFileSync_*/FreeFileSync/Build/Resources.zip ffs-source/FreeFileSync/Build/
           fi
 
       - name: Extract architecture from target
         id: arch
         run: |
-          # target 格式为 linux-xxx，取出第二部分
           ARCH="${{ github.event.inputs.target }}"
           echo "arch=${ARCH#linux-}" >> $GITHUB_OUTPUT
 
@@ -120,7 +105,6 @@ jobs:
             sed -i 's/^CXX = g++/CXX = g++-11/' Makefile
           fi
           echo "LDFLAGS += -static-libstdc++ -static-libgcc" >> Makefile
-          # 添加 wxWidgets 库路径
           echo "CXXFLAGS += -I$HOME/wx-install/include" >> Makefile
           echo "LDFLAGS += -L$HOME/wx-install/lib" >> Makefile
 
@@ -145,28 +129,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare source code
+      - name: Extract source code
         run: |
-          if [ -f "FreeFileSync/Source/FreeFileSync/FreeFileSync_${FFS_VERSION}_Source.zip" ]; then
+          if [ -f "$SOURCE_ZIP_PATH" ]; then
             echo "Found source zip, extracting..."
-            unzip -q "FreeFileSync/Source/FreeFileSync/FreeFileSync_${FFS_VERSION}_Source.zip" -d ffs-source
-            mv ffs-source/FreeFileSync_*_Source ffs-source/FreeFileSync
-          elif [ -d "FreeFileSync/Source" ]; then
-            echo "Using existing source directory"
-            mkdir -p ffs-source
-            cp -r FreeFileSync/Source ffs-source/FreeFileSync
+            unzip -q "$SOURCE_ZIP_PATH" -d ffs-source-tmp
+            mv ffs-source-tmp/FreeFileSync_*_Source ffs-source
           else
-            echo "Cannot find FreeFileSync source in repository"
+            echo "Error: Source zip not found at $SOURCE_ZIP_PATH"
             exit 1
-          fi
-
-      - name: Ensure Resources.zip exists
-        run: |
-          if [ ! -f ffs-source/FreeFileSync/Build/Resources.zip ]; then
-            echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-            curl -L -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
-            unzip -q fallback.zip -d fallback
-            cp fallback/FreeFileSync_*/FreeFileSync/Build/Resources.zip ffs-source/FreeFileSync/Build/
           fi
 
       - name: Extract architecture from target
@@ -216,32 +187,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare source code
+      - name: Extract source code
         shell: pwsh
         run: |
-          $zipPath = "FreeFileSync/Source/FreeFileSync/FreeFileSync_$env:FFS_VERSION`_Source.zip"
+          $zipPath = "$env:SOURCE_ZIP_PATH"
           if (Test-Path $zipPath) {
             Write-Host "Found source zip, extracting..."
-            Expand-Archive -Path $zipPath -DestinationPath ffs-source -Force
-            Get-ChildItem -Path ffs-source -Directory | Rename-Item -NewName "FreeFileSync"
-          } elseif (Test-Path "FreeFileSync/Source") {
-            Write-Host "Using existing source directory"
-            New-Item -ItemType Directory -Path ffs-source -Force
-            Copy-Item -Recurse "FreeFileSync/Source" -Destination "ffs-source/FreeFileSync"
+            Expand-Archive -Path $zipPath -DestinationPath ffs-source-tmp -Force
+            # 重命名解压出的目录（假设只有一个目录）
+            Get-ChildItem -Path ffs-source-tmp -Directory | Rename-Item -NewName "ffs-source"
           } else {
-            Write-Error "Cannot find FreeFileSync source in repository"
+            Write-Error "Source zip not found at $zipPath"
             exit 1
-          }
-
-      - name: Ensure Resources.zip exists
-        shell: pwsh
-        run: |
-          if (-not (Test-Path "ffs-source/FreeFileSync/Build/Resources.zip")) {
-            Write-Host "Resources.zip missing, downloading from version $env:RESOURCES_FALLBACK_VERSION"
-            $fallbackUrl = "https://freefilesync.org/download/FreeFileSync_$env:RESOURCES_FALLBACK_VERSION`_Source.zip"
-            Invoke-WebRequest -Uri $fallbackUrl -OutFile fallback.zip
-            Expand-Archive -Path fallback.zip -DestinationPath fallback -Force
-            Copy-Item "fallback/FreeFileSync_*/FreeFileSync/Build/Resources.zip" -Destination "ffs-source/FreeFileSync/Build/"
           }
 
       - name: Extract architecture from target
@@ -271,7 +228,7 @@ jobs:
       - name: Build FreeFileSync (using solution file)
         shell: pwsh
         run: |
-          cd ffs-source/FreeFileSync/Source
+          cd ffs-source\FreeFileSync\Source
           $platform = @{
             "x86" = "Win32"
             "x64" = "x64"
@@ -289,4 +246,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FreeFileSync-Windows-${{ steps.arch.outputs.arch }}
-          path: ffs-source/FreeFileSync/Build/Bin/
+          path: ffs-source\FreeFileSync\Build\Bin\
