@@ -57,9 +57,9 @@ jobs:
           brew update
           brew install boost wxwidgets libssh2 pkg-config
 
-      # 修复头文件：在 zen/string_base.h 开头插入 #include <atomic>
+      # 修复头文件：在 Source/zen/string_base.h 开头插入 #include <atomic>
       - name: Apply atomic header patch
-        working-directory: FreeFileSync/FreeFileSync
+        working-directory: FreeFileSync/FreeFileSync/Source
         run: |
           echo "Current directory: $(pwd)"
           ls -la
@@ -76,9 +76,9 @@ jobs:
             exit 1
           fi
 
-      # 验证补丁是否成功（已添加 working-directory）
+      # 验证补丁是否成功
       - name: Verify atomic header patch
-        working-directory: FreeFileSync/FreeFileSync
+        working-directory: FreeFileSync/FreeFileSync/Source
         run: |
           echo "=== First 5 lines of zen/string_base.h ==="
           head -5 zen/string_base.h
@@ -86,7 +86,6 @@ jobs:
             echo "✅ atomic header included"
           else
             echo "❌ atomic header NOT included"
-            # 强制再次插入
             echo '#include <atomic>' | cat - zen/string_base.h > temp && mv temp zen/string_base.h
             echo "Retry: inserted again"
             head -5 zen/string_base.h
