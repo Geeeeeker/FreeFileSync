@@ -141,40 +141,60 @@ jobs:
           make -j$(nproc)
           make install
 
-      # ---------- 修复头文件路径（确保 zen/warn_static.h 可被找到）----------
+      # ---------- 修复头文件路径（智能查找 zen 目录）----------
       - name: Prepare include path (Linux)
         if: matrix.platform == 'linux'
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
-          echo "=== Finding zen directory ==="
-          # 确定 zen 目录的绝对路径（通常位于 FreeFileSync/FreeFileSync/zen）
-          ZEN_PATH=$(cd .. && pwd)/zen
-          if [ -d "$ZEN_PATH" ]; then
-            echo "zen directory found at: $ZEN_PATH"
-            # 将 -I$ZEN_PATH 添加到 CXXFLAGS
-            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
-          else
-            echo "ERROR: zen directory not found at $ZEN_PATH"
+          echo "=== Locating zen directory ==="
+          # 从当前目录开始向上查找包含 zen 的目录
+          ZEN_PATH=""
+          DIR=$(pwd)
+          while [ "$DIR" != "/" ]; do
+            if [ -d "$DIR/zen" ]; then
+              ZEN_PATH="$DIR/zen"
+              break
+            fi
+            DIR=$(dirname "$DIR")
+          done
+          if [ -z "$ZEN_PATH" ]; then
+            echo "ERROR: zen directory not found!"
             exit 1
           fi
-          # 同时创建符号链接，以备其他情况
-          ln -sf $ZEN_PATH zen
+          echo "zen directory found at: $ZEN_PATH"
+          # 将 -I$ZEN_PATH 添加到 CXXFLAGS
+          if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
+            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
+          else
+            echo "CXXFLAGS += -I$ZEN_PATH" >> Makefile
+          fi
+          # 创建符号链接，以备其他情况
+          ln -sf "$ZEN_PATH" zen
 
       - name: Prepare include path (Windows)
         if: matrix.platform == 'windows'
         shell: msys2 {0}
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
-          echo "=== Finding zen directory ==="
-          # Windows 路径转换：使用 cygpath 或直接拼接
-          ZEN_PATH="$(cd .. && pwd)/zen"
-          if [ -d "$ZEN_PATH" ]; then
-            echo "zen directory found at: $ZEN_PATH"
-            # 将 -I$ZEN_PATH 添加到 CXXFLAGS
+          echo "=== Locating zen directory ==="
+          ZEN_PATH=""
+          DIR=$(pwd)
+          while [ "$DIR" != "/" ]; do
+            if [ -d "$DIR/zen" ]; then
+              ZEN_PATH="$DIR/zen"
+              break
+            fi
+            DIR=$(dirname "$DIR")
+          done
+          if [ -z "$ZEN_PATH" ]; then
+            echo "ERROR: zen directory not found!"
+            exit 1
+          fi
+          echo "zen directory found at: $ZEN_PATH"
+          if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
             sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
           else
-            echo "ERROR: zen directory not found at $ZEN_PATH"
-            exit 1
+            echo "CXXFLAGS += -I$ZEN_PATH" >> Makefile
           fi
           ln -sf "$ZEN_PATH" zen
 
@@ -202,7 +222,6 @@ jobs:
           PKG_CONFIG_PATH: /mingw64/lib/pkgconfig
         run: |
           export PATH=/mingw64/bin:$PATH
-          # 确保编译器为 g++
           sed -i 's/\bg++\b/g++/g' Makefile
           make -j$(nproc)
           mkdir -p $GITHUB_WORKSPACE/artifacts/
