@@ -1,167 +1,62 @@
-name: Build FreeFileSync (macOS)
+- name: Build FreeFileSync for ${{ matrix.arch }}
+  working-directory: FreeFileSync/FreeFileSync/Source
+  env:
+    ARCH: ${{ matrix.arch }}
+  run: |
+    if [ "$ARCH" = "x86_64" ]; then
+      ARCH_FLAGS="-arch x86_64"
+      HOMEBREW_PREFIX="/usr/local"
+    elif [ "$ARCH" = "arm64" ]; then
+      ARCH_FLAGS="-arch arm64"
+      HOMEBREW_PREFIX="/opt/homebrew"
+    else
+      echo "Unsupported architecture: $ARCH"
+      exit 1
+    fi
 
-on:
-  workflow_dispatch:
-    inputs:
-      architectures:
-        description: 'Target architectures (comma separated: x86_64, arm64)'
-        required: true
-        default: 'x86_64,arm64'
-        type: string
+    export CXX=clang++
+    export CXXFLAGS="$ARCH_FLAGS -std=c++17 -stdlib=libc++ -I$HOMEBREW_PREFIX/include"
+    export LDFLAGS="$ARCH_FLAGS -L$HOMEBREW_PREFIX/lib"
 
-jobs:
-  setup:
-    runs-on: macos-latest
-    outputs:
-      matrix: ${{ steps.generate.outputs.matrix }}
-    steps:
-      - name: Generate build matrix
-        id: generate
-        run: |
-          SUPPORTED="x86_64 arm64"
-          IFS=',' read -r -a ARCHS <<< "${{ inputs.architectures }}"
-          MATRIX_ENTRIES=()
-          for arch in "${ARCHS[@]}"; do
-            arch=$(echo "$arch" | xargs)
-            if [[ " $SUPPORTED " =~ " $arch " ]]; then
-              MATRIX_ENTRIES+=("{\"arch\":\"$arch\"}")
-            else
-              echo "Warning: $arch is not supported, skipping"
-            fi
-          done
-          if [ ${#MATRIX_ENTRIES[@]} -eq 0 ]; then
-            echo "No valid architectures selected."
-            exit 1
-          fi
-          matrix_json=$(printf '%s\n' "${MATRIX_ENTRIES[@]}" | jq -c -s '.')
-          echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
+    # 可选：暂时禁用 wx-config 和 pkg-config，先测试基础编译
+    # if command -v wx-config &> /dev/null; then
+    #   WX_FLAGS=$(wx-config --cxxflags --libs)
+    #   export CXXFLAGS="$CXXFLAGS $WX_FLAGS"
+    # fi
+    # if command -v pkg-config &> /dev/null; then
+    #   LIBSSH2_CFLAGS=$(pkg-config --cflags libssh2 2>/dev/null || echo "")
+    #   LIBSSH2_LIBS=$(pkg-config --libs libssh2 2>/dev/null || echo "")
+    #   export CXXFLAGS="$CXXFLAGS $LIBSSH2_CFLAGS"
+    #   export LDFLAGS="$LDFLAGS $LIBSSH2_LIBS"
+    # fi
 
-  build:
-    needs: setup
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        include: ${{ fromJson(needs.setup.outputs.matrix) }}
-      fail-fast: false
+    sed -i '' 's/\bg++\b/clang++/g' Makefile
 
-    steps:
-      - name: Checkout source code (master branch)
-        uses: actions/checkout@v4
-        with:
-          repository: Geeeeeker/FreeFileSync
-          ref: master
-          path: FreeFileSync
+    export MACOSX_DEPLOYMENT_TARGET=11.0
 
-      - name: Install dependencies via Homebrew
-        run: |
-          brew update
-          brew install boost wxwidgets libssh2 pkg-config
+    # === 诊断信息 ===
+    echo "=== Current directory ==="
+    pwd
+    echo "=== Source files (*.cpp) ==="
+    find . -maxdepth 1 -name "*.cpp" | sort
+    echo "=== Makefile SRC/OBJS variables ==="
+    grep -E '^(SRC|OBJS|SOURCES)' Makefile || echo "No SRC/OBJS found"
+    echo "=== Makefile first 20 lines ==="
+    head -20 Makefile
+    echo "=== Environment TMPDIR ==="
+    echo "$TMPDIR"
+    echo "=== Dry run (make -n) ==="
+    make -n 2>&1 | head -30
 
-      # 修复头文件：在 zen/string_base.h 开头插入 #include <atomic>
-      - name: Apply atomic header patch
-        working-directory: FreeFileSync/FreeFileSync
-        run: |
-          if [ -f zen/string_base.h ] && ! grep -q '#include <atomic>' zen/string_base.h; then
-            echo '#include <atomic>' | cat - zen/string_base.h > temp && mv temp zen/string_base.h
-          fi
+    # === 尝试构建，覆盖可能的临时目录变量 ===
+    echo "=== Attempt build with OBJDIR=./ ==="
+    make V=1 -j$(sysctl -n hw.logicalcpu) OBJDIR=./ 2>&1 | tee build_${{ matrix.arch }}.log || true
 
-      # 定位 zen 目录并添加包含路径
-      - name: Locate zen directory and fix includes
-        working-directory: FreeFileSync/FreeFileSync/Source
-        run: |
-          echo "=== Locating zen directory ==="
-          ZEN_PATH=""
-          DIR=$(pwd)
-          while [ "$DIR" != "/" ]; do
-            if [ -d "$DIR/zen" ]; then
-              ZEN_PATH="$DIR/zen"
-              break
-            fi
-            DIR=$(dirname "$DIR")
-          done
-          if [ -z "$ZEN_PATH" ]; then
-            echo "ERROR: zen directory not found!"
-            exit 1
-          fi
-          echo "zen directory found at: $ZEN_PATH"
-          if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
-            sed -i '' "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
-          else
-            echo "CXXFLAGS += -I$ZEN_PATH" >> Makefile
-          fi
-          ln -sf "$ZEN_PATH" zen
+    # 如果上面的命令失败，尝试另一种变量名
+    if [ $? -ne 0 ]; then
+      echo "=== First attempt failed, trying with TMPDIR=./ ==="
+      make V=1 -j$(sysctl -n hw.logicalcpu) TMPDIR=./ 2>&1 | tee -a build_${{ matrix.arch }}.log
+    fi
 
-      # 构建前的调试信息
-      - name: Debug environment
-        working-directory: FreeFileSync/FreeFileSync/Source
-        run: |
-          echo "=== Compiler info ==="
-          clang++ --version
-          echo "=== Makefile content ==="
-          cat Makefile
-          echo "=== Homebrew prefix ==="
-          brew --prefix
-          echo "=== wxWidgets flags ==="
-          wx-config --cxxflags --libs || echo "wx-config not found"
-          echo "=== pkg-config libssh2 ==="
-          pkg-config --cflags --libs libssh2 || echo "libssh2 pc not found"
-          echo "=== Current directory ==="
-          pwd
-          ls -la
-
-      - name: Build FreeFileSync for ${{ matrix.arch }}
-        working-directory: FreeFileSync/FreeFileSync/Source
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          if [ "$ARCH" = "x86_64" ]; then
-            ARCH_FLAGS="-arch x86_64"
-            HOMEBREW_PREFIX="/usr/local"
-          elif [ "$ARCH" = "arm64" ]; then
-            ARCH_FLAGS="-arch arm64"
-            HOMEBREW_PREFIX="/opt/homebrew"
-          else
-            echo "Unsupported architecture: $ARCH"
-            exit 1
-          fi
-
-          # 设置编译器和基础标志（使用 C++17 以获得更好的兼容性）
-          export CXX=clang++
-          export CXXFLAGS="$ARCH_FLAGS -std=c++17 -stdlib=libc++ -I$HOMEBREW_PREFIX/include"
-          export LDFLAGS="$ARCH_FLAGS -L$HOMEBREW_PREFIX/lib"
-
-          # 通过 pkg-config 或 wx-config 获取依赖标志
-          if command -v wx-config &> /dev/null; then
-            WX_FLAGS=$(wx-config --cxxflags --libs)
-            export CXXFLAGS="$CXXFLAGS $WX_FLAGS"
-          fi
-          if command -v pkg-config &> /dev/null; then
-            LIBSSH2_CFLAGS=$(pkg-config --cflags libssh2 2>/dev/null || echo "")
-            LIBSSH2_LIBS=$(pkg-config --libs libssh2 2>/dev/null || echo "")
-            export CXXFLAGS="$CXXFLAGS $LIBSSH2_CFLAGS"
-            export LDFLAGS="$LDFLAGS $LIBSSH2_LIBS"
-          fi
-
-          # 将 Makefile 中的 g++ 替换为 clang++
-          sed -i '' 's/\bg++\b/clang++/g' Makefile
-
-          # 设置 macOS 最低部署版本（根据需求调整）
-          export MACOSX_DEPLOYMENT_TARGET=11.0
-
-          # 详细构建并保存日志
-          make V=1 -j$(sysctl -n hw.logicalcpu) 2>&1 | tee build_${{ matrix.arch }}.log
-
-          # 复制生成的可执行文件
-          mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }} || true
-
-      # 即使构建失败也上传日志和可执行文件（如果有）
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeFileSync-macos-${{ matrix.arch }}-logs
-          path: |
-            FreeFileSync/FreeFileSync/Source/build_${{ matrix.arch }}.log
-            artifacts/
-          if-no-files-found: warn
+    mkdir -p $GITHUB_WORKSPACE/artifacts/
+    cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }} || echo "Binary not found"
