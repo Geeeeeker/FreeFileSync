@@ -111,7 +111,7 @@ jobs:
             head -5 "$ZEN_PATH/string_base.h"
           fi
 
-      # 添加包含路径和创建软链接
+      # 添加包含路径和创建软链接（已在原始源码中生效）
       - name: Add zen include path and symlink
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
@@ -140,8 +140,9 @@ jobs:
           pwd
           ls -la
 
+      # 构建步骤：复制整个源码树到自定义目录，确保补丁生效
       - name: Build FreeFileSync for ${{ matrix.arch }}
-        working-directory: FreeFileSync/FreeFileSync/Source
+        working-directory: FreeFileSync/FreeFileSync
         env:
           ARCH: ${{ matrix.arch }}
         run: |
@@ -159,48 +160,52 @@ jobs:
           export CXX=clang++
           export CXXFLAGS="$ARCH_FLAGS -std=c++17 -stdlib=libc++ -I$HOMEBREW_PREFIX/include"
           export LDFLAGS="$ARCH_FLAGS -L$HOMEBREW_PREFIX/lib"
-
-          sed -i '' 's/\bg++\b/clang++/g' Makefile
           export MACOSX_DEPLOYMENT_TARGET=11.0
 
-          # 强制所有可能的临时目录变量指向当前目录下的子目录
-          export TMPDIR=$(pwd)/tmp_build
-          mkdir -p $TMPDIR obj
+          # 创建构建目录并复制整个源码树（当前目录为 FreeFileSync/FreeFileSync）
+          BUILD_DIR="$GITHUB_WORKSPACE/build_$ARCH"
+          echo "Creating build directory: $BUILD_DIR"
+          mkdir -p "$BUILD_DIR"
+          echo "Copying source files to build directory..."
+          cp -r . "$BUILD_DIR"
+          cd "$BUILD_DIR/Source"
 
-          # 检测并覆盖所有可能的构建目录变量
-          for var in OBJDIR BUILDDIR OUTDIR TMPDIR WORKDIR TMP WORK BUILD_DIR; do
-            if grep -q "^[[:space:]]*$var[[:space:]]*[:?]?=" Makefile; then
-              echo "Overriding $var to ./obj"
-              export $var="./obj"
+          # 再次确保补丁存在（复制后原始补丁应保留，但以防万一）
+          if [ -f zen/string_base.h ]; then
+            if ! grep -q '#include <atomic>' zen/string_base.h; then
+              echo '#include <atomic>' | cat - zen/string_base.h > temp && mv temp zen/string_base.h
+              echo "Reapplied atomic patch in build directory."
+            else
+              echo "atomic header already patched in build directory."
             fi
-          done
+          else
+            echo "ERROR: zen/string_base.h not found in build directory!"
+            exit 1
+          fi
 
-          # 额外处理可能存在的环境变量
-          export OBJDIR="./obj"
-          export BUILDDIR="./obj"
-          export TMP="./obj"
+          # 将 Makefile 中的 g++ 替换为 clang++
+          sed -i '' 's/\bg++\b/clang++/g' Makefile
 
-          echo "=== Current directory ==="
-          pwd
-          echo "=== Source files (*.cpp) ==="
-          find . -maxdepth 1 -name "*.cpp" | sort
-          echo "=== Makefile SRC/OBJS variables ==="
-          grep -E '^(SRC|OBJS|SOURCES)' Makefile || echo "No SRC/OBJS found"
-          echo "=== Dry run (make -n) ==="
-          make -n 2>&1 | head -30
+          # 构建
+          echo "Starting build..."
+          make V=1 -j$(sysctl -n hw.logicalcpu) 2>&1 | tee build.log
 
-          echo "=== Attempt build with overridden variables ==="
-          make V=1 -j$(sysctl -n hw.logicalcpu) 2>&1 | tee build_${{ matrix.arch }}.log
-
+          # 复制结果
           mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }} || echo "Binary not found"
+          if [ -f ../Build/Bin/FreeFileSync ]; then
+            cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
+            echo "Binary copied."
+          else
+            echo "Binary not found!"
+          fi
+
+          # 将构建日志复制到 artifacts 以便上传
+          cp build.log $GITHUB_WORKSPACE/artifacts/build_${{ matrix.arch }}.log
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: FreeFileSync-macos-${{ matrix.arch }}-logs
-          path: |
-            FreeFileSync/FreeFileSync/Source/build_${{ matrix.arch }}.log
-            artifacts/
+          path: artifacts/
           if-no-files-found: warn
