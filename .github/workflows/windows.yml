@@ -136,11 +136,7 @@ jobs:
           ZEN_PARENT=$(dirname "$ZEN_PATH")
           echo "zen parent directory: $ZEN_PARENT"
 
-          # 2. 设置编译器标志（环境变量 + make 参数）
-          export CXXFLAGS="-I$ZEN_PARENT -Wno-missing-include-dirs"
-          export CPPFLAGS="-I$ZEN_PARENT -Wno-missing-include-dirs"
-
-          # 3. 在临时构建目录创建符号链接（根据错误日志中的路径）
+          # 2. 在临时构建目录创建符号链接（根据错误日志中的路径）
           TMP_BUILD_DIR="/tmp/FreeFileSync_x86_64_Make/ffs/src"
           mkdir -p "$TMP_BUILD_DIR"
           rm -f "$TMP_BUILD_DIR/zen"
@@ -148,23 +144,25 @@ jobs:
           echo "Created symlink in $TMP_BUILD_DIR/zen"
           ls -la "$TMP_BUILD_DIR/zen" || true
 
-          # 4. 同时在源码目录也创建符号链接（以防万一）
+          # 3. 同时在源码目录也创建符号链接（以防万一）
           ln -sf "$ZEN_PATH" zen
 
-          # 5. 确保 wx-config 在 PATH 中
+          # 4. 确保 wx-config 在 PATH 中
           export PATH=/mingw64/bin:$PATH
 
-          # 6. 打印关键配置以便调试
-          echo "CXXFLAGS: $CXXFLAGS"
+          # 5. 打印关键配置以便调试
           echo "wx-config cxxflags:"
           wx-config --cxxflags
           echo "pkg-config gtk+-3.0 cflags:"
           pkg-config --cflags gtk+-3.0
 
-          # 7. 执行构建，显式传递 CXXFLAGS/CPPFLAGS 覆盖 Makefile 中的定义
-          make -j$(nproc) CXXFLAGS="$CXXFLAGS" CPPFLAGS="$CPPFLAGS"
+          # 6. 执行构建，保留 Makefile 中的原有 flags，并附加我们需要的路径
+          #   使用 $(CXXFLAGS) 和 $(CPPFLAGS) 让 make 展开为 Makefile 中定义的值
+          make -j$(nproc) \
+            CXXFLAGS="$(CXXFLAGS) -I$ZEN_PARENT -Wno-missing-include-dirs" \
+            CPPFLAGS="$(CPPFLAGS) -I$ZEN_PARENT -Wno-missing-include-dirs"
 
-          # 8. 复制产物
+          # 7. 复制产物
           mkdir -p $GITHUB_WORKSPACE/artifacts/
           cp ../Build/Bin/FreeFileSync.exe $GITHUB_WORKSPACE/artifacts/FreeFileSync_windows_x64.exe
 
