@@ -1,4 +1,4 @@
-- name: Build FreeFileSync for ${{ matrix.arch }}
+  name: Build FreeFileSync for ${{ matrix.arch }}
   working-directory: FreeFileSync/FreeFileSync
   env:
     ARCH: ${{ matrix.arch }}
