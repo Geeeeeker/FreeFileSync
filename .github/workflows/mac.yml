@@ -163,34 +163,37 @@ jobs:
           mkdir -p "$BUILD_DIR"
           echo "Copying source files to build directory..."
           cp -r . "$BUILD_DIR"
-          
+
           # 调试：列出构建目录内容
           echo "=== Contents of $BUILD_DIR ==="
           ls -la "$BUILD_DIR"
-          echo "=== Contents of $BUILD_DIR/zen (if exists) ==="
-          ls -la "$BUILD_DIR/zen" || echo "zen directory not found"
           
           cd "$BUILD_DIR/Source"
           
-          # 在构建目录中重新应用补丁（使用绝对路径）
-          echo "=== Ensuring atomic patch in build directory ==="
-          ZEN_PATH="$BUILD_DIR/zen"
-          if [ -f "$ZEN_PATH/string_base.h" ]; then
-            if ! grep -q '#include <atomic>' "$ZEN_PATH/string_base.h"; then
-              echo '#include <atomic>' | cat - "$ZEN_PATH/string_base.h" > temp && mv temp "$ZEN_PATH/string_base.h"
-              echo "Reapplied atomic patch in build directory."
-            else
-              echo "atomic header already patched in build directory."
-            fi
-          else
-            echo "ERROR: $ZEN_PATH/string_base.h not found in build directory!"
-            exit 1
-          fi
+          # 调试：列出 Source 目录内容，确认 zen 软链接
+          echo "=== Contents of Source directory ==="
+          ls -la
 
-          # 重新创建软链接，确保指向构建目录内的 zen
-          rm -f zen
-          ln -sf ../zen zen
-          echo "Created symlink zen -> ../zen"
+          # 通过 readlink 获取 zen 软链接的真实路径，并确保补丁应用到该位置
+          echo "=== Ensuring atomic patch in build directory ==="
+          if [ -L zen ]; then
+              REAL_ZEN=$(readlink zen)
+              echo "zen symlink points to $REAL_ZEN"
+              if [ -f "$REAL_ZEN/string_base.h" ]; then
+                  if ! grep -q '#include <atomic>' "$REAL_ZEN/string_base.h"; then
+                      echo '#include <atomic>' | cat - "$REAL_ZEN/string_base.h" > temp && mv temp "$REAL_ZEN/string_base.h"
+                      echo "Reapplied atomic patch to $REAL_ZEN/string_base.h"
+                  else
+                      echo "atomic header already patched in $REAL_ZEN/string_base.h"
+                  fi
+              else
+                  echo "ERROR: $REAL_ZEN/string_base.h not found!"
+                  exit 1
+              fi
+          else
+              echo "ERROR: zen is not a symlink in build directory!"
+              exit 1
+          fi
 
           # 将 Makefile 中的 g++ 替换为 clang++
           sed -i '' 's/\bg++\b/clang++/g' Makefile
@@ -202,7 +205,7 @@ jobs:
 
           # 替换所有绝对路径的 -I 指向原始 zen 目录为相对路径 -I./zen
           echo "=== Replacing absolute zen include paths with relative ==="
-          sed -i '' "s|-I/Users/runner/work/FreeFileSync/FreeFileSync/FreeFileSync/zen|-I./zen|g" Makefile
+          sed -i '' 's|-I/Users/runner/work/FreeFileSync/FreeFileSync/FreeFileSync/zen|-I./zen|g' Makefile
 
           # 可选：移除可能引起问题的 gtk+ 相关标志（macOS 不需要）
           sed -i '' '/pkg-config --cflags gtk+-3.0/d' Makefile
