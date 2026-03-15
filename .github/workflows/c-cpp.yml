@@ -18,7 +18,7 @@ on:
 
 env:
   FFS_VERSION: 14.8
-  RESOURCES_FALLBACK_VERSION: 14.7   # 如果 Resources.zip 缺失，从此版本复制
+  RESOURCES_FALLBACK_VERSION: 14.7
 
 jobs:
   ###########################################################################
@@ -34,10 +34,23 @@ jobs:
       - name: Ensure Resources.zip exists
         run: |
           if [ ! -f FreeFileSync/Build/Resources.zip ]; then
-            echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-            wget -q -O fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
-            unzip -q fallback.zip -d fallback
-            cp fallback/FreeFileSync_*/FreeFileSync/Build/Resources.zip FreeFileSync/Build/
+              echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
+              curl -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
+              # 检查文件大小（至少 1MB）
+              size=$(wc -c < fallback.zip)
+              if [ $size -lt 1000000 ]; then
+                  echo "Downloaded file is too small, likely invalid"
+                  exit 1
+              fi
+              unzip -q fallback.zip -d fallback
+              found=$(find fallback -name "Resources.zip" -print -quit)
+              if [ -z "$found" ]; then
+                  echo "Could not find Resources.zip in the extracted files"
+                  exit 1
+              fi
+              mkdir -p FreeFileSync/Build
+              cp "$found" FreeFileSync/Build/
+              rm -rf fallback.zip fallback
           fi
 
       - name: Install dependencies
@@ -82,7 +95,7 @@ jobs:
           path: FreeFileSync/Build/Bin/
 
   ###########################################################################
-  # Linux aarch64 (交叉编译)
+  # Linux aarch64
   ###########################################################################
   linux-aarch64:
     if: github.event.inputs.target == 'linux-aarch64'
@@ -94,10 +107,22 @@ jobs:
       - name: Ensure Resources.zip exists
         run: |
           if [ ! -f FreeFileSync/Build/Resources.zip ]; then
-            echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-            wget -q -O fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
-            unzip -q fallback.zip -d fallback
-            cp fallback/FreeFileSync_*/FreeFileSync/Build/Resources.zip FreeFileSync/Build/
+              echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
+              curl -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
+              size=$(wc -c < fallback.zip)
+              if [ $size -lt 1000000 ]; then
+                  echo "Downloaded file is too small, likely invalid"
+                  exit 1
+              fi
+              unzip -q fallback.zip -d fallback
+              found=$(find fallback -name "Resources.zip" -print -quit)
+              if [ -z "$found" ]; then
+                  echo "Could not find Resources.zip in the extracted files"
+                  exit 1
+              fi
+              mkdir -p FreeFileSync/Build
+              cp "$found" FreeFileSync/Build/
+              rm -rf fallback.zip fallback
           fi
 
       - name: Install cross-compilation dependencies
@@ -161,10 +186,22 @@ jobs:
       - name: Ensure Resources.zip exists
         run: |
           if [ ! -f FreeFileSync/Build/Resources.zip ]; then
-            echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-            curl -L -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
-            unzip -q fallback.zip -d fallback
-            cp fallback/FreeFileSync_*/FreeFileSync/Build/Resources.zip FreeFileSync/Build/
+              echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
+              curl -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
+              size=$(wc -c < fallback.zip)
+              if [ $size -lt 1000000 ]; then
+                  echo "Downloaded file is too small, likely invalid"
+                  exit 1
+              fi
+              unzip -q fallback.zip -d fallback
+              found=$(find fallback -name "Resources.zip" -print -quit)
+              if [ -z "$found" ]; then
+                  echo "Could not find Resources.zip in the extracted files"
+                  exit 1
+              fi
+              mkdir -p FreeFileSync/Build
+              cp "$found" FreeFileSync/Build/
+              rm -rf fallback.zip fallback
           fi
 
       - name: Install Homebrew dependencies
@@ -202,10 +239,22 @@ jobs:
       - name: Ensure Resources.zip exists
         run: |
           if [ ! -f FreeFileSync/Build/Resources.zip ]; then
-            echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-            curl -L -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
-            unzip -q fallback.zip -d fallback
-            cp fallback/FreeFileSync_*/FreeFileSync/Build/Resources.zip FreeFileSync/Build/
+              echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
+              curl -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
+              size=$(wc -c < fallback.zip)
+              if [ $size -lt 1000000 ]; then
+                  echo "Downloaded file is too small, likely invalid"
+                  exit 1
+              fi
+              unzip -q fallback.zip -d fallback
+              found=$(find fallback -name "Resources.zip" -print -quit)
+              if [ -z "$found" ]; then
+                  echo "Could not find Resources.zip in the extracted files"
+                  exit 1
+              fi
+              mkdir -p FreeFileSync/Build
+              cp "$found" FreeFileSync/Build/
+              rm -rf fallback.zip fallback
           fi
 
       - name: Install Homebrew dependencies
@@ -243,12 +292,39 @@ jobs:
       - name: Ensure Resources.zip exists
         shell: pwsh
         run: |
-          if (-not (Test-Path "FreeFileSync/Build/Resources.zip")) {
-            Write-Host "Resources.zip missing, downloading from version $env:RESOURCES_FALLBACK_VERSION"
-            $fallbackUrl = "https://freefilesync.org/download/FreeFileSync_$env:RESOURCES_FALLBACK_VERSION`_Source.zip"
-            Invoke-WebRequest -Uri $fallbackUrl -OutFile fallback.zip
-            Expand-Archive -Path fallback.zip -DestinationPath fallback -Force
-            Copy-Item "fallback/FreeFileSync_*/FreeFileSync/Build/Resources.zip" -Destination "FreeFileSync/Build/"
+          $resourcesPath = "FreeFileSync/Build/Resources.zip"
+          if (-not (Test-Path $resourcesPath)) {
+              Write-Host "Resources.zip missing, attempting to download from version $env:RESOURCES_FALLBACK_VERSION"
+              $fallbackUrl = "https://freefilesync.org/download/FreeFileSync_$env:RESOURCES_FALLBACK_VERSION`_Source.zip"
+              $fallbackZip = "fallback.zip"
+              
+              Write-Host "Downloading from $fallbackUrl"
+              curl.exe -L -f -o $fallbackZip $fallbackUrl
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "Failed to download fallback source from $fallbackUrl"
+                  exit 1
+              }
+              
+              if ((Get-Item $fallbackZip).Length -lt 1MB) {
+                  Write-Error "Downloaded file is too small, likely invalid"
+                  exit 1
+              }
+              
+              $tempDir = "fallback_temp"
+              Expand-Archive -Path $fallbackZip -DestinationPath $tempDir -Force
+              
+              $foundResource = Get-ChildItem -Path $tempDir -Recurse -Filter "Resources.zip" | Select-Object -First 1
+              if (-not $foundResource) {
+                  Write-Error "Could not find Resources.zip in the extracted files"
+                  exit 1
+              }
+              
+              New-Item -ItemType Directory -Force -Path (Split-Path $resourcesPath -Parent) | Out-Null
+              Copy-Item -Path $foundResource.FullName -Destination $resourcesPath -Force
+              Write-Host "Resources.zip successfully placed at $resourcesPath"
+              
+              Remove-Item -Path $fallbackZip -Force
+              Remove-Item -Path $tempDir -Recurse -Force
           }
 
       - name: Install vcpkg and dependencies (x86)
@@ -263,9 +339,9 @@ jobs:
       - name: Build FreeFileSync (x86)
         run: |
           cd FreeFileSync/Source
-          $vcpkgPath = "$pwd/../../vcpkg/scripts/buildsystems/vcpkg.cmake"
+          $vcpkgPath = "$pwd\..\..\vcpkg\scripts\buildsystems\vcpkg.cmake"
           msbuild FreeFileSync.sln /p:Configuration=Release /p:Platform=Win32 `
-            /p:VcpkgTriplet=x86-windows-static /p:VcpkgEnabled=true /p:VcpkgRoot="$pwd/../../vcpkg/installed"
+            /p:VcpkgTriplet=x86-windows-static /p:VcpkgEnabled=true /p:VcpkgRoot="$pwd\..\..\vcpkg\installed"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -286,12 +362,39 @@ jobs:
       - name: Ensure Resources.zip exists
         shell: pwsh
         run: |
-          if (-not (Test-Path "FreeFileSync/Build/Resources.zip")) {
-            Write-Host "Resources.zip missing, downloading from version $env:RESOURCES_FALLBACK_VERSION"
-            $fallbackUrl = "https://freefilesync.org/download/FreeFileSync_$env:RESOURCES_FALLBACK_VERSION`_Source.zip"
-            Invoke-WebRequest -Uri $fallbackUrl -OutFile fallback.zip
-            Expand-Archive -Path fallback.zip -DestinationPath fallback -Force
-            Copy-Item "fallback/FreeFileSync_*/FreeFileSync/Build/Resources.zip" -Destination "FreeFileSync/Build/"
+          $resourcesPath = "FreeFileSync/Build/Resources.zip"
+          if (-not (Test-Path $resourcesPath)) {
+              Write-Host "Resources.zip missing, attempting to download from version $env:RESOURCES_FALLBACK_VERSION"
+              $fallbackUrl = "https://freefilesync.org/download/FreeFileSync_$env:RESOURCES_FALLBACK_VERSION`_Source.zip"
+              $fallbackZip = "fallback.zip"
+              
+              Write-Host "Downloading from $fallbackUrl"
+              curl.exe -L -f -o $fallbackZip $fallbackUrl
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "Failed to download fallback source from $fallbackUrl"
+                  exit 1
+              }
+              
+              if ((Get-Item $fallbackZip).Length -lt 1MB) {
+                  Write-Error "Downloaded file is too small, likely invalid"
+                  exit 1
+              }
+              
+              $tempDir = "fallback_temp"
+              Expand-Archive -Path $fallbackZip -DestinationPath $tempDir -Force
+              
+              $foundResource = Get-ChildItem -Path $tempDir -Recurse -Filter "Resources.zip" | Select-Object -First 1
+              if (-not $foundResource) {
+                  Write-Error "Could not find Resources.zip in the extracted files"
+                  exit 1
+              }
+              
+              New-Item -ItemType Directory -Force -Path (Split-Path $resourcesPath -Parent) | Out-Null
+              Copy-Item -Path $foundResource.FullName -Destination $resourcesPath -Force
+              Write-Host "Resources.zip successfully placed at $resourcesPath"
+              
+              Remove-Item -Path $fallbackZip -Force
+              Remove-Item -Path $tempDir -Recurse -Force
           }
 
       - name: Install vcpkg and dependencies (x64)
@@ -306,9 +409,9 @@ jobs:
       - name: Build FreeFileSync (x64)
         run: |
           cd FreeFileSync/Source
-          $vcpkgPath = "$pwd/../../vcpkg/scripts/buildsystems/vcpkg.cmake"
+          $vcpkgPath = "$pwd\..\..\vcpkg\scripts\buildsystems\vcpkg.cmake"
           msbuild FreeFileSync.sln /p:Configuration=Release /p:Platform=x64 `
-            /p:VcpkgTriplet=x64-windows-static /p:VcpkgEnabled=true /p:VcpkgRoot="$pwd/../../vcpkg/installed"
+            /p:VcpkgTriplet=x64-windows-static /p:VcpkgEnabled=true /p:VcpkgRoot="$pwd\..\..\vcpkg\installed"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -329,12 +432,39 @@ jobs:
       - name: Ensure Resources.zip exists
         shell: pwsh
         run: |
-          if (-not (Test-Path "FreeFileSync/Build/Resources.zip")) {
-            Write-Host "Resources.zip missing, downloading from version $env:RESOURCES_FALLBACK_VERSION"
-            $fallbackUrl = "https://freefilesync.org/download/FreeFileSync_$env:RESOURCES_FALLBACK_VERSION`_Source.zip"
-            Invoke-WebRequest -Uri $fallbackUrl -OutFile fallback.zip
-            Expand-Archive -Path fallback.zip -DestinationPath fallback -Force
-            Copy-Item "fallback/FreeFileSync_*/FreeFileSync/Build/Resources.zip" -Destination "FreeFileSync/Build/"
+          $resourcesPath = "FreeFileSync/Build/Resources.zip"
+          if (-not (Test-Path $resourcesPath)) {
+              Write-Host "Resources.zip missing, attempting to download from version $env:RESOURCES_FALLBACK_VERSION"
+              $fallbackUrl = "https://freefilesync.org/download/FreeFileSync_$env:RESOURCES_FALLBACK_VERSION`_Source.zip"
+              $fallbackZip = "fallback.zip"
+              
+              Write-Host "Downloading from $fallbackUrl"
+              curl.exe -L -f -o $fallbackZip $fallbackUrl
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "Failed to download fallback source from $fallbackUrl"
+                  exit 1
+              }
+              
+              if ((Get-Item $fallbackZip).Length -lt 1MB) {
+                  Write-Error "Downloaded file is too small, likely invalid"
+                  exit 1
+              }
+              
+              $tempDir = "fallback_temp"
+              Expand-Archive -Path $fallbackZip -DestinationPath $tempDir -Force
+              
+              $foundResource = Get-ChildItem -Path $tempDir -Recurse -Filter "Resources.zip" | Select-Object -First 1
+              if (-not $foundResource) {
+                  Write-Error "Could not find Resources.zip in the extracted files"
+                  exit 1
+              }
+              
+              New-Item -ItemType Directory -Force -Path (Split-Path $resourcesPath -Parent) | Out-Null
+              Copy-Item -Path $foundResource.FullName -Destination $resourcesPath -Force
+              Write-Host "Resources.zip successfully placed at $resourcesPath"
+              
+              Remove-Item -Path $fallbackZip -Force
+              Remove-Item -Path $tempDir -Recurse -Force
           }
 
       - name: Install vcpkg and dependencies (arm64)
@@ -349,9 +479,9 @@ jobs:
       - name: Build FreeFileSync (arm64)
         run: |
           cd FreeFileSync/Source
-          $vcpkgPath = "$pwd/../../vcpkg/scripts/buildsystems/vcpkg.cmake"
+          $vcpkgPath = "$pwd\..\..\vcpkg\scripts\buildsystems\vcpkg.cmake"
           msbuild FreeFileSync.sln /p:Configuration=Release /p:Platform=ARM64 `
-            /p:VcpkgTriplet=arm64-windows-static /p:VcpkgEnabled=true /p:VcpkgRoot="$pwd/../../vcpkg/installed"
+            /p:VcpkgTriplet=arm64-windows-static /p:cpkgEnabled=true /p:VcpkgRoot="$pwd\..\..\vcpkg\installed"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
