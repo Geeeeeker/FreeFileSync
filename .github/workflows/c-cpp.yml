@@ -1,279 +1,219 @@
-name: Build FreeFileSync (Selectable Target)
+name: Build FreeFileSync
 
 on:
   workflow_dispatch:
     inputs:
-      target:
-        description: '选择要构建的平台和架构'
+      platforms:
+        description: 'Target platforms (comma separated: linux, windows, macos)'
         required: true
-        type: choice
-        options:
-          - linux-x86_64
-          - linux-aarch64
-          - macos-x86_64
-          - macos-arm64
-          - windows-x86
-          - windows-x64
-          - windows-arm64
-
-env:
-  FFS_VERSION: 14.7
-  SOURCE_ZIP_PATH: FreeFileSync/FreeFileSync_14.7_Source.zip
+        default: 'linux,windows,macos'
+        type: string
+      architectures:
+        description: 'Target architectures (comma separated: x86, x64, arm, arm64)'
+        required: true
+        default: 'x86,x64,arm,arm64'
+        type: string
 
 jobs:
-  ###########################################################################
-  # Linux 构建 (x86_64 原生, aarch64 使用 Docker + QEMU)
-  ###########################################################################
-  build-linux:
-    runs-on: ubuntu-22.04
-    if: startsWith(github.event.inputs.target, 'linux-')
+  # 前置 job：解析输入，生成有效的构建矩阵（平台 + 架构组合）
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Extract source code
+      - name: Generate build matrix
+        id: generate
         run: |
-          if [ ! -f "$SOURCE_ZIP_PATH" ]; then
-            echo "Error: Source zip not found at $SOURCE_ZIP_PATH"
+          # 定义每个平台支持的架构
+          declare -A SUPPORTED=(
+            [linux]="x86 x64 arm arm64"
+            [windows]="x86 x64 arm arm64"
+            [macos]="x64 arm64"
+          )
+
+          # 将输入的逗号分隔字符串转换为数组
+          IFS=',' read -r -a PLATFORMS <<< "${{ inputs.platforms }}"
+          IFS=',' read -r -a ARCHS <<< "${{ inputs.architectures }}"
+
+          MATRIX_ENTRIES=()
+          for platform in "${PLATFORMS[@]}"; do
+            platform=$(echo "$platform" | xargs) # 去除空格
+            if [[ -z "${SUPPORTED[$platform]}" ]]; then
+              echo "Unsupported platform: $platform"
+              exit 1
+            fi
+            for arch in "${ARCHS[@]}"; do
+              arch=$(echo "$arch" | xargs)
+              if [[ " ${SUPPORTED[$platform]} " =~ " $arch " ]]; then
+                MATRIX_ENTRIES+=("{\"platform\":\"$platform\",\"arch\":\"$arch\"}")
+              else
+                echo "Warning: $arch is not supported on $platform, skipping"
+              fi
+            done
+          done
+
+          # 转换为 JSON 数组字符串
+          if [ ${#MATRIX_ENTRIES[@]} -eq 0 ]; then
+            echo "No valid (platform, arch) pairs selected."
             exit 1
           fi
-          echo "Found source zip, extracting..."
-          unzip -q "$SOURCE_ZIP_PATH" -d ffs-source-tmp
-          # 解压后可能得到一个包含版本号的目录，统一重命名为 ffs-source
-          if [ $(ls -1 ffs-source-tmp | wc -l) -eq 1 ] && [ -d "ffs-source-tmp/$(ls ffs-source-tmp)" ]; then
-            mv "ffs-source-tmp/$(ls ffs-source-tmp)" ffs-source
-          else
-            mkdir -p ffs-source
-            mv ffs-source-tmp/* ffs-source/ 2>/dev/null || true
-          fi
-          rm -rf ffs-source-tmp
-          echo "Final source structure:"
-          ls -la ffs-source
 
-      - name: Extract architecture from target
-        id: arch
-        run: |
-          ARCH="${{ github.event.inputs.target }}"
-          echo "arch=${ARCH#linux-}" >> $GITHUB_OUTPUT
+          matrix_json=$(printf '%s\n' "${MATRIX_ENTRIES[@]}" | jq -s '.')
+          echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
 
-      ############ x86_64 原生构建 ############
-      - name: Install native dependencies (x86_64)
-        if: steps.arch.outputs.arch == 'x86_64'
+  # 实际构建 job：根据矩阵并行构建每个组合
+  build:
+    needs: setup
+    runs-on: ${{ matrix.platform == 'windows' && 'windows-latest' || matrix.platform == 'macos' && 'macos-latest' || 'ubuntu-latest' }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.matrix) }}
+      fail-fast: false  # 一个组合失败不影响其他组合
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          repository: Geeeeeker/FreeFileSync
+          ref: main  # 请根据实际分支或标签修改，例如 v14.8
+          path: FreeFileSync
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
         run: |
           sudo apt update
-          sudo apt install -y g++-11 make libboost-all-dev libssl-dev libssh2-1-dev libcurl4-openssl-dev
-          sudo snap install cmake --classic
+          sudo apt install -y g++ make libboost-all-dev
 
-      - name: Cache wxWidgets build (x86_64)
-        if: steps.arch.outputs.arch == 'x86_64'
-        id: cache-wx
-        uses: actions/cache@v4
+      - name: Install Windows dependencies (MSYS2)
+        if: matrix.platform == 'windows'
+        uses: msys2/setup-msys2@v2
         with:
-          path: ~/wx-install
-          key: ${{ runner.os }}-x86_64-wxWidgets-3.1.5
+          msystem: MINGW64  # 可根据架构选择 MINGW32/MINGW64/CLANGARM64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-boost
+            mingw-w64-x86_64-wxWidgets
 
-      - name: Build and install wxWidgets (x86_64)
-        if: steps.arch.outputs.arch == 'x86_64' && steps.cache-wx.outputs.cache-hit != 'true'
-        run: |
-          wget -q https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.5/wxWidgets-3.1.5.tar.bz2
-          tar -xf wxWidgets-3.1.5.tar.bz2
-          cd wxWidgets-3.1.5
-          mkdir gtk-build && cd gtk-build
-          ../configure --disable-shared --enable-unicode --prefix=$HOME/wx-install
-          make -j$(nproc)
-          make install
-
-      - name: Configure Makefile for x86_64
-        if: steps.arch.outputs.arch == 'x86_64'
-        run: |
-          cd ffs-source/FreeFileSync/Source
-          sed -i 's/^CXX = g++/CXX = g++-11/' Makefile
-          echo "LDFLAGS += -static-libstdc++ -static-libgcc" >> Makefile
-          echo "CXXFLAGS += -I$HOME/wx-install/include" >> Makefile
-          echo "LDFLAGS += -L$HOME/wx-install/lib" >> Makefile
-
-      - name: Build FreeFileSync (x86_64)
-        if: steps.arch.outputs.arch == 'x86_64'
-        run: |
-          cd ffs-source/FreeFileSync/Source
-          make -j$(nproc)
-
-      ############ aarch64 使用 Docker + QEMU ############
-      - name: Set up QEMU
-        if: steps.arch.outputs.arch == 'aarch64'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      - name: Build in ARM64 container
-        if: steps.arch.outputs.arch == 'aarch64'
-        run: |
-          # 创建容器内构建脚本（添加 bzip2 以支持 .tar.bz2 解压）
-          cat > build-in-container.sh << 'EOF'
-          #!/bin/bash
-          set -e
-          apt update
-          apt install -y wget make g++ libboost-all-dev libssl-dev libssh2-1-dev libcurl4-openssl-dev bzip2
-          # 编译 wxWidgets（版本 3.1.5）
-          wget -q https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.5/wxWidgets-3.1.5.tar.bz2
-          tar -xf wxWidgets-3.1.5.tar.bz2
-          cd wxWidgets-3.1.5
-          mkdir gtk-build && cd gtk-build
-          ../configure --disable-shared --enable-unicode --prefix=/wx-install
-          make -j$(nproc)
-          make install
-          # 编译 FreeFileSync
-          cd /workspace/ffs-source/FreeFileSync/Source
-          # 使用默认 g++（容器内已是原生 arm64 编译器）
-          sed -i 's/^CXX = g++/CXX = g++/' Makefile
-          echo "CXXFLAGS += -I/wx-install/include" >> Makefile
-          echo "LDFLAGS += -L/wx-install/lib -static-libstdc++ -static-libgcc" >> Makefile
-          make -j$(nproc)
-          EOF
-          chmod +x build-in-container.sh
-
-          # 运行 arm64 容器，挂载源码和脚本
-          docker run --rm --platform linux/arm64 \
-            -v $PWD/ffs-source:/workspace/ffs-source \
-            -v $PWD/build-in-container.sh:/build.sh \
-            ubuntu:22.04 /bin/bash /build.sh
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeFileSync-Linux-${{ steps.arch.outputs.arch }}
-          path: ffs-source/FreeFileSync/Build/Bin/
-
-  ###########################################################################
-  # macOS 构建 (根据架构选择 runner)
-  ###########################################################################
-  build-macos:
-    runs-on: ${{ (contains(github.event.inputs.target, 'arm64') && 'macos-14') || 'macos-13' }}
-    if: startsWith(github.event.inputs.target, 'macos-')
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Extract source code
-        run: |
-          if [ ! -f "$SOURCE_ZIP_PATH" ]; then
-            echo "Error: Source zip not found at $SOURCE_ZIP_PATH"
-            exit 1
-          fi
-          unzip -q "$SOURCE_ZIP_PATH" -d ffs-source-tmp
-          if [ $(ls -1 ffs-source-tmp | wc -l) -eq 1 ] && [ -d "ffs-source-tmp/$(ls ffs-source-tmp)" ]; then
-            mv "ffs-source-tmp/$(ls ffs-source-tmp)" ffs-source
-          else
-            mkdir -p ffs-source
-            mv ffs-source-tmp/* ffs-source/ 2>/dev/null || true
-          fi
-          rm -rf ffs-source-tmp
-          ls -la ffs-source
-
-      - name: Extract architecture from target
-        id: arch
-        run: |
-          ARCH="${{ github.event.inputs.target }}"
-          echo "arch=${ARCH#macos-}" >> $GITHUB_OUTPUT
-
-      - name: Install Homebrew dependencies
+      - name: Install macOS dependencies
+        if: matrix.platform == 'macos'
         run: |
           brew update
-          brew install boost wxwidgets libssh2 curl
+          brew install boost wxwidgets
 
-      - name: Configure Makefile for architecture
+      # 通用步骤：编译安装 wxWidgets（如果包管理器版本不满足要求，可取消注释并调整）
+      # - name: Build wxWidgets from source
+      #   if: matrix.platform == 'linux' || matrix.platform == 'macos'
+      #   run: |
+      #     wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
+      #     tar xf wxWidgets-3.1.2.tar.bz2
+      #     cd wxWidgets-3.1.2
+      #     mkdir gtk-build && cd gtk-build
+      #     ../configure --disable-shared --enable-unicode
+      #     make -j$(nproc)
+      #     sudo make install
+
+      # 为不同架构准备交叉编译工具链（仅 Linux）
+      - name: Install cross-compilation tools (Linux)
+        if: matrix.platform == 'linux' && (matrix.arch == 'arm' || matrix.arch == 'arm64')
         run: |
-          cd ffs-source/FreeFileSync/Source
-          if [ "${{ steps.arch.outputs.arch }}" = "arm64" ]; then
-            sed -i '' 's/^CXX = g++/CXX = clang++ -arch arm64/' Makefile
-          else
-            sed -i '' 's/^CXX = g++/CXX = clang++ -arch x86_64/' Makefile
-          fi
-          echo "LDFLAGS += -framework CoreFoundation -framework Security" >> Makefile
+          sudo apt install -y \
+            g++-arm-linux-gnueabihf \
+            g++-aarch64-linux-gnu
+          # 如需为 ARM 编译 wxWidgets，可在此处交叉编译并安装到 sysroot
 
-      - name: Build FreeFileSync
+      # 构建 Linux 版本
+      - name: Build FreeFileSync for Linux
+        if: matrix.platform == 'linux'
+        working-directory: FreeFileSync/FreeFileSync/Source
         run: |
-          cd ffs-source/FreeFileSync/Source
-          make -j$(sysctl -n hw.ncpu)
+          # 根据架构选择编译器
+          case "${{ matrix.arch }}" in
+            x86)
+              export CXX=g++ -m32
+              export AR=gcc-ar
+              ;;
+            x64)
+              export CXX=g++ -m64
+              export AR=gcc-ar
+              ;;
+            arm)
+              export CXX=arm-linux-gnueabihf-g++
+              export AR=arm-linux-gnueabihf-ar
+              ;;
+            arm64)
+              export CXX=aarch64-linux-gnu-g++
+              export AR=aarch64-linux-gnu-ar
+              ;;
+          esac
+          # 如果 Makefile 中硬编码了 g++，需要替换（类似原流程步骤4）
+          sed -i "s/\bg++\b/${CXX}/g" Makefile
+          make -j$(nproc)
 
-      - name: Upload artifact
+          # 将生成的二进制移到方便上传的位置
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_${{ matrix.arch }}
+
+      # 构建 Windows 版本（使用 MSYS2 的 MinGW）
+      - name: Build FreeFileSync for Windows
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          # 根据架构选择工具链
+          case "${{ matrix.arch }}" in
+            x86)
+              export PATH=/mingw32/bin:$PATH
+              export CXX=g++
+              ;;
+            x64)
+              export PATH=/mingw64/bin:$PATH
+              export CXX=g++
+              ;;
+            arm)
+              export PATH=/clangarm64/bin:$PATH
+              export CXX=clang++  # MSYS2 中 ARM64 使用 clang
+              ;;
+            arm64)
+              export PATH=/clangarm64/bin:$PATH
+              export CXX=clang++
+              ;;
+          esac
+          # 修改 Makefile 中的编译器（如果使用 Makefile）
+          sed -i "s/\bg++\b/${CXX}/g" Makefile
+          make -j$(nproc)
+
+          # 假设生成的 exe 在 ../Build/Bin/
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync.exe $GITHUB_WORKSPACE/artifacts/FreeFileSync_windows_${{ matrix.arch }}.exe
+
+      # 构建 macOS 版本
+      - name: Build FreeFileSync for macOS
+        if: matrix.platform == 'macos'
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          # 根据架构设置编译标志（macOS 使用 clang，x86_64 和 arm64 可通用）
+          case "${{ matrix.arch }}" in
+            x64)
+              export ARCH_FLAGS="-arch x86_64"
+              ;;
+            arm64)
+              export ARCH_FLAGS="-arch arm64"
+              ;;
+          esac
+          # 如果 Makefile 使用默认编译器，可能需要指定 CXX=clang++ 和相应标志
+          export CXX=clang++
+          export CXXFLAGS="$ARCH_FLAGS"
+          sed -i "s/\bg++\b/${CXX}/g" Makefile
+          make -j$(sysctl -n hw.logicalcpu)
+
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
+
+      # 上传所有构建产物
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: FreeFileSync-macOS-${{ steps.arch.outputs.arch }}
-          path: ffs-source/FreeFileSync/Build/Bin/
-
-  ###########################################################################
-  # Windows 构建 (使用 Visual Studio)
-  ###########################################################################
-  build-windows:
-    runs-on: windows-2022
-    if: startsWith(github.event.inputs.target, 'windows-')
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Extract source code
-        shell: pwsh
-        run: |
-          $zipPath = "$env:SOURCE_ZIP_PATH"
-          if (-not (Test-Path $zipPath)) {
-            Write-Error "Source zip not found at $zipPath"
-            exit 1
-          }
-          Expand-Archive -Path $zipPath -DestinationPath ffs-source-tmp -Force
-          $items = Get-ChildItem ffs-source-tmp
-          if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
-            Rename-Item -Path $items[0].FullName -NewName "ffs-source"
-          } else {
-            New-Item -ItemType Directory -Path ffs-source -Force
-            Move-Item -Path ffs-source-tmp\* -Destination ffs-source\ -Force
-          }
-          Remove-Item -Recurse -Force ffs-source-tmp
-          Get-ChildItem ffs-source
-
-      - name: Extract architecture from target
-        id: arch
-        shell: pwsh
-        run: |
-          $target = "${{ github.event.inputs.target }}"
-          $arch = $target -replace '^windows-', ''
-          echo "arch=$arch" >> $env:GITHUB_OUTPUT
-
-      - name: Install vcpkg and dependencies
-        shell: pwsh
-        run: |
-          git clone https://github.com/Microsoft/vcpkg.git
-          .\vcpkg\bootstrap-vcpkg.bat
-          $triplet = @{
-            "x86" = "x86-windows-static"
-            "x64" = "x64-windows-static"
-            "arm64" = "arm64-windows-static"
-          }["${{ steps.arch.outputs.arch }}"]
-          .\vcpkg\vcpkg install boost wxwidgets libssh2 curl --triplet $triplet
-          echo "VCPKG_ROOT=$pwd\vcpkg" >> $env:GITHUB_ENV
-
-      - name: Set up Visual Studio environment
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Build FreeFileSync (using solution file)
-        shell: pwsh
-        run: |
-          cd ffs-source\FreeFileSync\Source
-          $platform = @{
-            "x86" = "Win32"
-            "x64" = "x64"
-            "arm64" = "ARM64"
-          }["${{ steps.arch.outputs.arch }}"]
-          $vcpkgTriplet = @{
-            "x86" = "x86-windows-static"
-            "x64" = "x64-windows-static"
-            "arm64" = "arm64-windows-static"
-          }["${{ steps.arch.outputs.arch }}"]
-          msbuild FreeFileSync.sln /p:Configuration=Release /p:Platform=$platform `
-            /p:VcpkgTriplet=$vcpkgTriplet /p:VcpkgEnabled=true /p:VcpkgRoot="$env:VCPKG_ROOT\installed"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeFileSync-Windows-${{ steps.arch.outputs.arch }}
-          path: ffs-source\FreeFileSync\Build\Bin\
+          name: FreeFileSync-${{ matrix.platform }}-${{ matrix.arch }}
+          path: artifacts/
