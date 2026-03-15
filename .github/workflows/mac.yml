@@ -57,13 +57,34 @@ jobs:
           brew update
           brew install boost wxwidgets libssh2 pkg-config
 
+      # 修复头文件：在 zen/string_base.h 开头插入 #include <atomic>
       - name: Apply atomic header patch
         working-directory: FreeFileSync/FreeFileSync
         run: |
           if [ -f zen/string_base.h ] && ! grep -q '#include <atomic>' zen/string_base.h; then
             echo '#include <atomic>' | cat - zen/string_base.h > temp && mv temp zen/string_base.h
+            echo "Patch applied."
+          else
+            echo "File already contains #include <atomic> or not found."
           fi
 
+      # 验证补丁是否成功
+      - name: Verify atomic header patch
+        working-directory: FreeFileSync/FreeFileSync
+        run: |
+          echo "=== First 5 lines of zen/string_base.h ==="
+          head -5 zen/string_base.h
+          if grep -q '#include <atomic>' zen/string_base.h; then
+            echo "✅ atomic header included"
+          else
+            echo "❌ atomic header NOT included"
+            # 强制再次插入
+            echo '#include <atomic>' | cat - zen/string_base.h > temp && mv temp zen/string_base.h
+            echo "Retry: inserted again"
+            head -5 zen/string_base.h
+          fi
+
+      # 定位 zen 目录并添加包含路径
       - name: Locate zen directory and fix includes
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
@@ -89,6 +110,7 @@ jobs:
           fi
           ln -sf "$ZEN_PATH" zen
 
+      # 调试环境
       - name: Debug environment
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
@@ -126,9 +148,33 @@ jobs:
           export CXXFLAGS="$ARCH_FLAGS -std=c++17 -stdlib=libc++ -I$HOMEBREW_PREFIX/include"
           export LDFLAGS="$ARCH_FLAGS -L$HOMEBREW_PREFIX/lib"
 
+          # 可选：通过 pkg-config/wx-config 添加依赖（若需要请取消注释）
+          # if command -v wx-config &> /dev/null; then
+          #   WX_FLAGS=$(wx-config --cxxflags --libs)
+          #   export CXXFLAGS="$CXXFLAGS $WX_FLAGS"
+          # fi
+          # if command -v pkg-config &> /dev/null; then
+          #   LIBSSH2_CFLAGS=$(pkg-config --cflags libssh2 2>/dev/null || echo "")
+          #   LIBSSH2_LIBS=$(pkg-config --libs libssh2 2>/dev/null || echo "")
+          #   export CXXFLAGS="$CXXFLAGS $LIBSSH2_CFLAGS"
+          #   export LDFLAGS="$LDFLAGS $LIBSSH2_LIBS"
+          # fi
+
           sed -i '' 's/\bg++\b/clang++/g' Makefile
 
           export MACOSX_DEPLOYMENT_TARGET=11.0
+
+          # 检测并覆盖可能的构建目录变量，强制在当前目录下生成目标文件
+          echo "=== Detecting build directory variables in Makefile ==="
+          grep -E '^(OBJDIR|BUILDDIR|OUTDIR|TMPDIR|WORKDIR)[[:space:]]*[:?]?=' Makefile || echo "No build dir variables found"
+
+          mkdir -p ./obj
+          for var in OBJDIR BUILDDIR OUTDIR TMPDIR WORKDIR; do
+            if grep -q "^[[:space:]]*$var[[:space:]]*[:?]?=" Makefile; then
+              echo "Overriding $var to ./obj"
+              export $var="./obj"
+            fi
+          done
 
           echo "=== Current directory ==="
           pwd
@@ -139,13 +185,8 @@ jobs:
           echo "=== Dry run (make -n) ==="
           make -n 2>&1 | head -30
 
-          echo "=== Attempt build with OBJDIR=./ ==="
-          make V=1 -j$(sysctl -n hw.logicalcpu) OBJDIR=./ 2>&1 | tee build_${{ matrix.arch }}.log || true
-
-          if [ ${PIPESTATUS[0]} -ne 0 ]; then
-            echo "=== First attempt failed, trying with TMPDIR=./ ==="
-            make V=1 -j$(sysctl -n hw.logicalcpu) TMPDIR=./ 2>&1 | tee -a build_${{ matrix.arch }}.log
-          fi
+          echo "=== Attempt build with overridden variables ==="
+          make V=1 -j$(sysctl -n hw.logicalcpu) 2>&1 | tee build_${{ matrix.arch }}.log
 
           mkdir -p $GITHUB_WORKSPACE/artifacts/
           cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }} || echo "Binary not found"
