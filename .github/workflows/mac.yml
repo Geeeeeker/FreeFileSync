@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: 'Target platforms (only macos supported)'
+        description: "Target platforms (only macos supported)"
         required: true
-        default: 'macos'
+        default: "macos"
         type: string
       architectures:
-        description: 'Target architectures (comma separated: x86_64, arm64) [x64 will be mapped to x86_64]'
+        description: "Target architectures (comma separated: x86_64, arm64) [x64 will be mapped to x86_64]"
         required: true
-        default: 'x86_64,arm64'
+        default: "x86_64,arm64"
         type: string
 
 jobs:
@@ -128,19 +128,19 @@ jobs:
           fi
 
       # ========== 构建 FreeFileSync ==========
-   - name: Build FreeFileSync binary
-  run: |
-    cd FreeFileSync/FreeFileSync/Source
-    export PKG_CONFIG_PATH="$HOME/wx-install/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig"
-    
-    # 先清理
-    make clean || true
-    
-    # 编译，显示详细错误，指定 C++17
-    make V=1 -j$(sysctl -n hw.logicalcpu) CXX=clang++ CXXFLAGS="-std=c++17"
-    
-    mkdir -p $GITHUB_WORKSPACE/artifacts/
-    cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
+      - name: Build FreeFileSync binary
+        run: |
+          cd FreeFileSync/FreeFileSync/Source
+
+          # 设置 pkg-config 路径：包含 wxWidgets 和 Homebrew 库
+          export PKG_CONFIG_PATH="$HOME/wx-install/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig"
+
+          # 使用 clang 编译（macOS 默认编译器）
+          make -j$(sysctl -n hw.logicalcpu) CXX=clang++
+
+          # 复制产物
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
 
       # ========== 上传构建产物 ==========
       - name: Upload artifacts
