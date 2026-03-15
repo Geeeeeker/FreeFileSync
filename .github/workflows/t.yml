@@ -1,0 +1,171 @@
+name: Build FreeFileSync
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Target platforms (comma separated: linux, windows)'
+        required: true
+        default: 'linux,windows'
+        type: string
+      architectures:
+        description: 'Target architectures (comma separated: x64)'
+        required: true
+        default: 'x64'
+        type: string
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+    steps:
+      - name: Generate build matrix
+        id: generate
+        run: |
+          # 定义每个平台支持的架构（目前仅 x64，可扩展）
+          declare -A SUPPORTED=(
+            [linux]="x64"
+            [windows]="x64"
+          )
+
+          IFS=',' read -r -a PLATFORMS <<< "${{ inputs.platforms }}"
+          IFS=',' read -r -a ARCHS <<< "${{ inputs.architectures }}"
+
+          MATRIX_ENTRIES=()
+          for platform in "${PLATFORMS[@]}"; do
+            platform=$(echo "$platform" | xargs)
+            if [[ -z "${SUPPORTED[$platform]}" ]]; then
+              echo "Unsupported platform: $platform"
+              exit 1
+            fi
+            for arch in "${ARCHS[@]}"; do
+              arch=$(echo "$arch" | xargs)
+              if [[ " ${SUPPORTED[$platform]} " =~ " $arch " ]]; then
+                MATRIX_ENTRIES+=("{\"platform\":\"$platform\",\"arch\":\"$arch\"}")
+              else
+                echo "Warning: $arch is not supported on $platform, skipping"
+              fi
+            done
+          done
+
+          if [ ${#MATRIX_ENTRIES[@]} -eq 0 ]; then
+            echo "No valid (platform, arch) pairs selected."
+            exit 1
+          fi
+
+          matrix_json=$(printf '%s\n' "${MATRIX_ENTRIES[@]}" | jq -c -s '.')
+          echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
+
+  build:
+    needs: setup
+    runs-on: ${{ matrix.platform == 'windows' && 'windows-latest' || 'ubuntu-22.04' }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.matrix) }}
+      fail-fast: false
+
+    steps:
+      - name: Checkout source code (master branch)
+        uses: actions/checkout@v4
+        with:
+          repository: Geeeeeker/FreeFileSync
+          ref: master
+          path: FreeFileSync
+
+      # ---------- Linux 依赖安装 ----------
+      - name: Install Linux base dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            g++ make \
+            libboost-all-dev \
+            libcurl4-openssl-dev \
+            libssh2-1-dev \
+            libidn2-dev \
+            libgtk-3-dev \
+            pkg-config \
+            autoconf automake libtool \
+            gettext \
+            wget
+
+      # 手动编译 wxWidgets 3.1.2（Linux）
+      - name: Build and install wxWidgets 3.1.2 (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
+          tar xf wxWidgets-3.1.2.tar.bz2
+          cd wxWidgets-3.1.2
+          mkdir gtk-build && cd gtk-build
+          ../configure --disable-shared --enable-unicode --prefix=/usr/local
+          make -j$(nproc)
+          sudo make install
+          sudo ldconfig
+
+      # ---------- Windows 依赖安装 (MSYS2) ----------
+      - name: Install Windows dependencies (MSYS2)
+        if: matrix.platform == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-boost
+            mingw-w64-x86_64-wxwidgets
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-libssh2
+            mingw-w64-x86_64-gtk3
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-openssl
+
+      # ---------- 修复头文件路径（创建符号链接 zen -> ../zen）----------
+      - name: Fix include path for Linux
+        if: matrix.platform == 'linux'
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          ln -sf ../zen zen
+
+      - name: Fix include path for Windows
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          ln -sf ../zen zen
+
+      # ---------- Linux 构建 (x64) ----------
+      - name: Build FreeFileSync for Linux (x64)
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        working-directory: FreeFileSync/FreeFileSync/Source
+        env:
+          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig
+        run: |
+          export PATH=/usr/local/bin:$PATH
+          sed -i 's/\bg++\b/g++/g' Makefile
+          make -j$(nproc)
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_x64
+
+      # ---------- Windows 构建 (x64) ----------
+      - name: Build FreeFileSync for Windows (x64)
+        if: matrix.platform == 'windows' && matrix.arch == 'x64'
+        shell: msys2 {0}
+        working-directory: FreeFileSync/FreeFileSync/Source
+        env:
+          MSYSTEM: MINGW64
+          PKG_CONFIG_PATH: /mingw64/lib/pkgconfig
+        run: |
+          export PATH=/mingw64/bin:$PATH
+          sed -i 's/\bg++\b/g++/g' Makefile
+          make -j$(nproc)
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync.exe $GITHUB_WORKSPACE/artifacts/FreeFileSync_windows_x64.exe
+
+      # ---------- 上传构建产物 ----------
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeFileSync-${{ matrix.platform }}-${{ matrix.arch }}
+          path: artifacts/
