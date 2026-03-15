@@ -119,11 +119,12 @@ jobs:
             mingw-w64-x86_64-gtk3
             mingw-w64-x86_64-pkg-config
             mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-autotools
             wget
             tar
             patch
 
-      # Windows 下手动编译 wxWidgets 3.1.2（因为 MSYS2 仓库中无可用包）
+      # Windows 下手动编译 wxWidgets 3.1.2（带 --disable-dependency-tracking）
       - name: Build and install wxWidgets 3.1.2 (Windows)
         if: matrix.platform == 'windows'
         shell: msys2 {0}
@@ -136,23 +137,63 @@ jobs:
           cd build-msw
           ../configure --disable-shared --enable-unicode --prefix=/mingw64 \
             --with-msw --with-libpng=builtin --with-libjpeg=builtin --with-libtiff=builtin \
-            --with-expat=builtin --with-zlib=builtin
+            --with-expat=builtin --with-zlib=builtin --disable-dependency-tracking
           make -j$(nproc)
           make install
 
-      # ---------- 修复头文件路径（创建符号链接 zen -> ../zen）----------
-      - name: Fix include path for Linux
+      # ---------- 修复头文件路径（确保 zen/warn_static.h 可被找到）----------
+      - name: Prepare include path (Linux)
         if: matrix.platform == 'linux'
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
-          ln -sf ../zen zen
+          echo "=== Directory structure ==="
+          pwd
+          ls -la ..
+          ls -la .
+          # 如果 Source/zen 不存在，尝试创建符号链接指向可能的 zen 位置
+          if [ ! -e zen ]; then
+            if [ -d ../zen ]; then
+              echo "Creating symlink zen -> ../zen"
+              ln -sf ../zen zen
+            elif [ -d ../../zen ]; then
+              echo "Creating symlink zen -> ../../zen"
+              ln -sf ../../zen zen
+            else
+              echo "ERROR: zen directory not found!"
+              exit 1
+            fi
+          else
+            echo "zen already exists"
+          fi
+          # 在 Makefile 中添加 -I. 确保当前目录被搜索
+          sed -i 's/\(CXXFLAGS[[:space:]]*+=\)/\1 -I./' Makefile
 
-      - name: Fix include path for Windows
+      - name: Prepare include path (Windows)
         if: matrix.platform == 'windows'
         shell: msys2 {0}
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
-          ln -sf ../zen zen
+          echo "=== Directory structure ==="
+          pwd
+          ls -la ../
+          ls -la ./
+          # 如果 Source/zen 不存在，尝试创建符号链接指向可能的 zen 位置
+          if [ ! -e zen ]; then
+            if [ -d ../zen ]; then
+              echo "Creating symlink zen -> ../zen"
+              ln -sf ../zen zen
+            elif [ -d ../../zen ]; then
+              echo "Creating symlink zen -> ../../zen"
+              ln -sf ../../zen zen
+            else
+              echo "ERROR: zen directory not found!"
+              exit 1
+            fi
+          else
+            echo "zen already exists"
+          fi
+          # 在 Makefile 中添加 -I. 确保当前目录被搜索
+          sed -i 's/\(CXXFLAGS[[:space:]]*+=\)/\1 -I./' Makefile
 
       # ---------- Linux 构建 (x64) ----------
       - name: Build FreeFileSync for Linux (x64)
@@ -162,6 +203,7 @@ jobs:
           PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig
         run: |
           export PATH=/usr/local/bin:$PATH
+          # 确保编译器为 g++
           sed -i 's/\bg++\b/g++/g' Makefile
           make -j$(nproc)
           mkdir -p $GITHUB_WORKSPACE/artifacts/
@@ -177,9 +219,7 @@ jobs:
           PKG_CONFIG_PATH: /mingw64/lib/pkgconfig
         run: |
           export PATH=/mingw64/bin:$PATH
-          # 确保 wx-config 在 PATH 中
-          export PATH=/mingw64/bin:$PATH
-          # 修改 Makefile 中编译器为 g++
+          # 确保编译器为 g++
           sed -i 's/\bg++\b/g++/g' Makefile
           make -j$(nproc)
           mkdir -p $GITHUB_WORKSPACE/artifacts/
