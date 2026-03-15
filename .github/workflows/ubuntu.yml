@@ -115,15 +115,15 @@ jobs:
           # 限制默认源仅为 amd64
           sudo sed -i 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
           sudo sed -i 's/^deb-src /deb-src [arch=amd64] /g' /etc/apt/sources.list
-          # 添加 armhf 的 ports 源
-          sudo sh -c 'echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main universe" > /etc/apt/sources.list.d/armhf.list'
+          # 添加 armhf 的完整 ports 源（包括 updates、security、backports）
+          sudo tee /etc/apt/sources.list.d/armhf-ports.list > /dev/null <<EOF
+deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
+deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
+deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-backports main restricted universe multiverse
+deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
+EOF
           sudo apt update
-          # 先尝试安装基础 C 库
-          sudo apt install -y --no-install-recommends \
-            zlib1g:armhf \
-            libexpat1:armhf \
-            libpython3.10-minimal:armhf || true
-          # 安装 Boost 必需组件（避免 libboost-all-dev 的复杂依赖）
+          # 安装所需依赖（仅必要的 Boost 组件）
           sudo apt install -y --no-install-recommends \
             libboost-filesystem-dev:armhf \
             libboost-system-dev:armhf \
@@ -141,15 +141,15 @@ jobs:
           # 限制默认源仅为 amd64
           sudo sed -i 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
           sudo sed -i 's/^deb-src /deb-src [arch=amd64] /g' /etc/apt/sources.list
-          # 添加 arm64 的 ports 源
-          sudo sh -c 'echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main universe" > /etc/apt/sources.list.d/arm64.list'
+          # 添加 arm64 的完整 ports 源
+          sudo tee /etc/apt/sources.list.d/arm64-ports.list > /dev/null <<EOF
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-backports main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
+EOF
           sudo apt update
-          # 先安装基础 C 库（这些通常是多架构库，必须显式安装）
-          sudo apt install -y --no-install-recommends \
-            zlib1g:arm64 \
-            libexpat1:arm64 \
-            libpython3.10-minimal:arm64 || true
-          # 安装 Boost 必需组件（避免 libboost-all-dev 的复杂依赖）
+          # 安装所需依赖（仅必要的 Boost 组件）
           sudo apt install -y --no-install-recommends \
             libboost-filesystem-dev:arm64 \
             libboost-system-dev:arm64 \
