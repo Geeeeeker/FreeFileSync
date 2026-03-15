@@ -141,59 +141,62 @@ jobs:
           make -j$(nproc)
           make install
 
-      # ---------- 修复头文件路径（确保 zen/warn_static.h 可被找到）----------
+      # ---------- 修复头文件路径（智能查找 zen 目录）----------
       - name: Prepare include path (Linux)
         if: matrix.platform == 'linux'
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
-          echo "=== Directory structure ==="
-          pwd
-          ls -la ..
-          ls -la .
-          # 如果 Source/zen 不存在，尝试创建符号链接指向可能的 zen 位置
-          if [ ! -e zen ]; then
-            if [ -d ../zen ]; then
-              echo "Creating symlink zen -> ../zen"
-              ln -sf ../zen zen
-            elif [ -d ../../zen ]; then
-              echo "Creating symlink zen -> ../../zen"
-              ln -sf ../../zen zen
-            else
-              echo "ERROR: zen directory not found!"
-              exit 1
+          echo "=== Locating zen directory ==="
+          # 从当前目录开始向上查找包含 zen 的目录
+          ZEN_PATH=""
+          DIR=$(pwd)
+          while [ "$DIR" != "/" ]; do
+            if [ -d "$DIR/zen" ]; then
+              ZEN_PATH="$DIR/zen"
+              break
             fi
-          else
-            echo "zen already exists"
+            DIR=$(dirname "$DIR")
+          done
+          if [ -z "$ZEN_PATH" ]; then
+            echo "ERROR: zen directory not found!"
+            exit 1
           fi
-          # 在 Makefile 中添加 -I. 确保当前目录被搜索
-          sed -i 's/\(CXXFLAGS[[:space:]]*+=\)/\1 -I./' Makefile
+          echo "zen directory found at: $ZEN_PATH"
+          # 将 -I$ZEN_PATH 添加到 CXXFLAGS
+          if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
+            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
+          else
+            echo "CXXFLAGS += -I$ZEN_PATH" >> Makefile
+          fi
+          # 创建符号链接，以备其他情况
+          ln -sf "$ZEN_PATH" zen
 
       - name: Prepare include path (Windows)
         if: matrix.platform == 'windows'
         shell: msys2 {0}
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
-          echo "=== Directory structure ==="
-          pwd
-          ls -la ../
-          ls -la ./
-          # 如果 Source/zen 不存在，尝试创建符号链接指向可能的 zen 位置
-          if [ ! -e zen ]; then
-            if [ -d ../zen ]; then
-              echo "Creating symlink zen -> ../zen"
-              ln -sf ../zen zen
-            elif [ -d ../../zen ]; then
-              echo "Creating symlink zen -> ../../zen"
-              ln -sf ../../zen zen
-            else
-              echo "ERROR: zen directory not found!"
-              exit 1
+          echo "=== Locating zen directory ==="
+          ZEN_PATH=""
+          DIR=$(pwd)
+          while [ "$DIR" != "/" ]; do
+            if [ -d "$DIR/zen" ]; then
+              ZEN_PATH="$DIR/zen"
+              break
             fi
-          else
-            echo "zen already exists"
+            DIR=$(dirname "$DIR")
+          done
+          if [ -z "$ZEN_PATH" ]; then
+            echo "ERROR: zen directory not found!"
+            exit 1
           fi
-          # 在 Makefile 中添加 -I. 确保当前目录被搜索
-          sed -i 's/\(CXXFLAGS[[:space:]]*+=\)/\1 -I./' Makefile
+          echo "zen directory found at: $ZEN_PATH"
+          if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
+            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
+          else
+            echo "CXXFLAGS += -I$ZEN_PATH" >> Makefile
+          fi
+          ln -sf "$ZEN_PATH" zen
 
       # ---------- Linux 构建 (x64) ----------
       - name: Build FreeFileSync for Linux (x64)
@@ -219,7 +222,6 @@ jobs:
           PKG_CONFIG_PATH: /mingw64/lib/pkgconfig
         run: |
           export PATH=/mingw64/bin:$PATH
-          # 确保编译器为 g++
           sed -i 's/\bg++\b/g++/g' Makefile
           make -j$(nproc)
           mkdir -p $GITHUB_WORKSPACE/artifacts/
