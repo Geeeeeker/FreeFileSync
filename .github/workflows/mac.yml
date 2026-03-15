@@ -78,7 +78,7 @@ jobs:
           echo "zen directory found at: $ZEN_PATH"
           echo "zen_path=$ZEN_PATH" >> $GITHUB_OUTPUT
 
-      - name: Apply atomic header patch
+      - name: Apply atomic header patch (to original source)
         run: |
           ZEN_PATH="${{ steps.find-zen.outputs.zen_path }}"
           echo "Patching $ZEN_PATH/string_base.h"
@@ -108,7 +108,7 @@ jobs:
             head -5 "$ZEN_PATH/string_base.h"
           fi
 
-      - name: Add zen include path and symlink
+      - name: Add zen include path and symlink (in original source)
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
           ZEN_PATH="${{ steps.find-zen.outputs.zen_path }}"
@@ -165,33 +165,43 @@ jobs:
           cp -r . "$BUILD_DIR"
           cd "$BUILD_DIR/Source"
 
-          # 再次确保补丁存在
-          if [ -f zen/string_base.h ]; then
-            if ! grep -q '#include <atomic>' zen/string_base.h; then
-              echo '#include <atomic>' | cat - zen/string_base.h > temp && mv temp zen/string_base.h
-              echo "Reapplied atomic patch in build directory."
+          # 在构建目录中重新应用补丁（针对实际文件位置）
+          echo "=== Ensuring atomic patch in build directory ==="
+          if [ -f ../zen/string_base.h ]; then
+            if ! grep -q '#include <atomic>' ../zen/string_base.h; then
+              echo '#include <atomic>' | cat - ../zen/string_base.h > temp && mv temp ../zen/string_base.h
+              echo "Reapplied atomic patch in build directory (../zen/string_base.h)."
             else
               echo "atomic header already patched in build directory."
             fi
           else
-            echo "ERROR: zen/string_base.h not found in build directory!"
+            echo "ERROR: ../zen/string_base.h not found in build directory!"
             exit 1
           fi
+
+          # 重新创建软链接，确保指向构建目录内的 zen（而不是原始路径）
+          rm -f zen
+          ln -sf ../zen zen
+          echo "Created symlink zen -> ../zen"
 
           # 将 Makefile 中的 g++ 替换为 clang++
           sed -i '' 's/\bg++\b/clang++/g' Makefile
 
-          # 关键修复：强制将临时目录变量 tmpPath 设置为当前目录下的固定路径
+          # 强制将临时目录变量 tmpPath 设置为当前目录下的固定路径
           echo "=== Patching Makefile to use fixed build directory ==="
           sed -i '' 's|^tmpPath =.*|tmpPath = ./build_temp|' Makefile
           mkdir -p ./build_temp
 
-          # 额外清理可能遗留的 /var/folders 路径（可选）
-          sed -i '' 's|/var/folders/[^ ]*/FreeFileSync_[^ ]*_Make|./build_temp|g' Makefile
+          # 替换所有绝对路径的 -I 指向原始 zen 目录为相对路径 -I./zen
+          echo "=== Replacing absolute zen include paths with relative ==="
+          sed -i '' 's|-I/Users/runner/work/FreeFileSync/FreeFileSync/FreeFileSync/zen|-I./zen|g' Makefile
 
-          # 显示修改后的 Makefile 片段
-          echo "=== Makefile after tmpPath patching (lines around tmpPath) ==="
-          grep -A 2 -B 2 '^tmpPath' Makefile || echo "tmpPath not found"
+          # 可选：移除可能引起问题的 gtk+ 相关标志（macOS 不需要）
+          sed -i '' '/pkg-config --cflags gtk+-3.0/d' Makefile
+
+          # 显示修改后的 Makefile 关键部分
+          echo "=== Makefile after patching (tmpPath and include paths) ==="
+          grep -E '^(tmpPath|CXXFLAGS.*-I\./zen)' Makefile || echo "Pattern not found"
 
           # 构建
           echo "=== Starting build ==="
