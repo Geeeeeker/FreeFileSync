@@ -61,14 +61,22 @@ jobs:
       - name: Apply atomic header patch
         working-directory: FreeFileSync/FreeFileSync
         run: |
-          if [ -f zen/string_base.h ] && ! grep -q '#include <atomic>' zen/string_base.h; then
-            echo '#include <atomic>' | cat - zen/string_base.h > temp && mv temp zen/string_base.h
-            echo "Patch applied."
+          echo "Current directory: $(pwd)"
+          ls -la
+          if [ -f zen/string_base.h ]; then
+            echo "zen/string_base.h exists"
+            if ! grep -q '#include <atomic>' zen/string_base.h; then
+              echo '#include <atomic>' | cat - zen/string_base.h > temp && mv temp zen/string_base.h
+              echo "Patch applied."
+            else
+              echo "File already contains #include <atomic>"
+            fi
           else
-            echo "File already contains #include <atomic> or not found."
+            echo "zen/string_base.h NOT found!"
+            exit 1
           fi
 
-      # 验证补丁是否成功
+      # 验证补丁是否成功（已添加 working-directory）
       - name: Verify atomic header patch
         working-directory: FreeFileSync/FreeFileSync
         run: |
