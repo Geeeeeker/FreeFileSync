@@ -18,11 +18,11 @@ on:
 
 env:
   FFS_VERSION: 14.7
-  SOURCE_ZIP_PATH: FreeFileSync/FreeFileSync_14.7_Source.zip   # 仓库内源码压缩包路径
+  SOURCE_ZIP_PATH: FreeFileSync/FreeFileSync_14.7_Source.zip
 
 jobs:
   ###########################################################################
-  # Linux 构建 (运行在 ubuntu-22.04)
+  # Linux 构建
   ###########################################################################
   build-linux:
     runs-on: ubuntu-22.04
@@ -33,15 +33,25 @@ jobs:
 
       - name: Extract source code
         run: |
-          if [ -f "$SOURCE_ZIP_PATH" ]; then
-            echo "Found source zip, extracting..."
-            unzip -q "$SOURCE_ZIP_PATH" -d ffs-source-tmp
-            # 解压后通常得到 FreeFileSystem_14.7_Source 目录，将其重命名为 ffs-source
-            mv ffs-source-tmp/FreeFileSync_*_Source ffs-source
-          else
+          if [ ! -f "$SOURCE_ZIP_PATH" ]; then
             echo "Error: Source zip not found at $SOURCE_ZIP_PATH"
             exit 1
           fi
+          echo "Found source zip, extracting..."
+          unzip -q "$SOURCE_ZIP_PATH" -d ffs-source-tmp
+          echo "Contents of temporary directory:"
+          ls -la ffs-source-tmp
+          # 如果临时目录下只有一个子目录，将其重命名为 ffs-source
+          if [ $(ls -1 ffs-source-tmp | wc -l) -eq 1 ] && [ -d "ffs-source-tmp/$(ls ffs-source-tmp)" ]; then
+            mv "ffs-source-tmp/$(ls ffs-source-tmp)" ffs-source
+          else
+            # 否则将所有内容移动到 ffs-source
+            mkdir -p ffs-source
+            mv ffs-source-tmp/* ffs-source/ 2>/dev/null || true
+          fi
+          rm -rf ffs-source-tmp
+          echo "Final source structure:"
+          ls -la ffs-source
 
       - name: Extract architecture from target
         id: arch
@@ -120,7 +130,7 @@ jobs:
           path: ffs-source/FreeFileSync/Build/Bin/
 
   ###########################################################################
-  # macOS 构建 (根据架构选择 runner)
+  # macOS 构建
   ###########################################################################
   build-macos:
     runs-on: ${{ (contains(github.event.inputs.target, 'arm64') && 'macos-14') || 'macos-13' }}
@@ -131,14 +141,23 @@ jobs:
 
       - name: Extract source code
         run: |
-          if [ -f "$SOURCE_ZIP_PATH" ]; then
-            echo "Found source zip, extracting..."
-            unzip -q "$SOURCE_ZIP_PATH" -d ffs-source-tmp
-            mv ffs-source-tmp/FreeFileSync_*_Source ffs-source
-          else
+          if [ ! -f "$SOURCE_ZIP_PATH" ]; then
             echo "Error: Source zip not found at $SOURCE_ZIP_PATH"
             exit 1
           fi
+          echo "Found source zip, extracting..."
+          unzip -q "$SOURCE_ZIP_PATH" -d ffs-source-tmp
+          echo "Contents of temporary directory:"
+          ls -la ffs-source-tmp
+          if [ $(ls -1 ffs-source-tmp | wc -l) -eq 1 ] && [ -d "ffs-source-tmp/$(ls ffs-source-tmp)" ]; then
+            mv "ffs-source-tmp/$(ls ffs-source-tmp)" ffs-source
+          else
+            mkdir -p ffs-source
+            mv ffs-source-tmp/* ffs-source/ 2>/dev/null || true
+          fi
+          rm -rf ffs-source-tmp
+          echo "Final source structure:"
+          ls -la ffs-source
 
       - name: Extract architecture from target
         id: arch
@@ -178,7 +197,7 @@ jobs:
           path: ffs-source/FreeFileSync/Build/Bin/
 
   ###########################################################################
-  # Windows 构建 (运行在 windows-2022)
+  # Windows 构建
   ###########################################################################
   build-windows:
     runs-on: windows-2022
@@ -191,15 +210,26 @@ jobs:
         shell: pwsh
         run: |
           $zipPath = "$env:SOURCE_ZIP_PATH"
-          if (Test-Path $zipPath) {
-            Write-Host "Found source zip, extracting..."
-            Expand-Archive -Path $zipPath -DestinationPath ffs-source-tmp -Force
-            # 重命名解压出的目录（假设只有一个目录）
-            Get-ChildItem -Path ffs-source-tmp -Directory | Rename-Item -NewName "ffs-source"
-          } else {
+          if (-not (Test-Path $zipPath)) {
             Write-Error "Source zip not found at $zipPath"
             exit 1
           }
+          Write-Host "Found source zip, extracting..."
+          Expand-Archive -Path $zipPath -DestinationPath ffs-source-tmp -Force
+          Write-Host "Contents of temporary directory:"
+          Get-ChildItem ffs-source-tmp
+          $items = Get-ChildItem ffs-source-tmp
+          if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
+            # 只有一个子目录，将其重命名为 ffs-source
+            Rename-Item -Path $items[0].FullName -NewName "ffs-source"
+          } else {
+            # 否则，创建 ffs-source 并将所有内容移入
+            New-Item -ItemType Directory -Path ffs-source -Force
+            Move-Item -Path ffs-source-tmp\* -Destination ffs-source\ -Force
+          }
+          Remove-Item -Recurse -Force ffs-source-tmp
+          Write-Host "Final source structure:"
+          Get-ChildItem ffs-source
 
       - name: Extract architecture from target
         id: arch
