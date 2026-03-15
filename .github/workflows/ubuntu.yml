@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: 'Target platforms (comma separated: linux)'
+        description: 'Target platforms (comma separated: linux, windows)'
         required: true
-        default: 'linux'
+        default: 'linux,windows'
         type: string
       architectures:
-        description: 'Target architectures (comma separated: x64, x86, arm, arm64)'
+        description: 'Target architectures (comma separated: x64)'
         required: true
-        default: 'x64,x86,arm,arm64'
+        default: 'x64'
         type: string
 
 jobs:
@@ -24,7 +24,8 @@ jobs:
         id: generate
         run: |
           declare -A SUPPORTED=(
-            [linux]="x64 x86 arm arm64"
+            [linux]="x64"
+            [windows]="x64"
           )
 
           IFS=',' read -r -a PLATFORMS <<< "${{ inputs.platforms }}"
@@ -57,7 +58,7 @@ jobs:
 
   build:
     needs: setup
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.platform == 'windows' && 'windows-latest' || 'ubuntu-22.04' }}
     strategy:
       matrix:
         include: ${{ fromJson(needs.setup.outputs.matrix) }}
@@ -71,195 +72,168 @@ jobs:
           ref: master
           path: FreeFileSync
 
-      # ========== 原生构建：x64 ==========
-      - name: Build for x64 (native)
-        if: matrix.arch == 'x64'
+      # ---------- Linux 依赖安装 ----------
+      - name: Install Linux base dependencies
+        if: matrix.platform == 'linux'
         run: |
-          # 安装基础工具
           sudo apt update
-          sudo apt install -y g++ make pkg-config autoconf automake libtool gettext wget
-
-          # 安装依赖
           sudo apt install -y \
+            g++ make \
             libboost-all-dev \
             libcurl4-openssl-dev \
             libssh2-1-dev \
             libidn2-dev \
             libgtk-3-dev \
-            libssl-dev
+            pkg-config \
+            autoconf automake libtool \
+            gettext \
+            wget
 
-          # 编译 wxWidgets
+      - name: Build and install wxWidgets 3.1.2 (Linux)
+        if: matrix.platform == 'linux'
+        run: |
           wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
           tar xf wxWidgets-3.1.2.tar.bz2
           cd wxWidgets-3.1.2
           mkdir gtk-build && cd gtk-build
-          ../configure --disable-shared --enable-unicode --prefix=/usr/local --with-gtk=3
+          ../configure --disable-shared --enable-unicode --prefix=/usr/local
           make -j$(nproc)
           sudo make install
           sudo ldconfig
-          cd ../..
 
-          # 修复 zen 头文件路径
-          cd FreeFileSync/FreeFileSync/Source
-          ZEN_PATH=$(find $GITHUB_WORKSPACE/FreeFileSync -type d -name zen | head -1)
-          if [ -n "$ZEN_PATH" ]; then
-            echo "zen directory found at: $ZEN_PATH"
-            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
-            ln -sf "$ZEN_PATH" zen
-          else
-            echo "ERROR: zen directory not found"
-            exit 1
-          fi
+      # ---------- Windows 依赖安装 (MSYS2) ----------
+      - name: Install Windows base dependencies (MSYS2)
+        if: matrix.platform == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-boost
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-libssh2
+            mingw-w64-x86_64-gtk3
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-autotools
+            wget
+            tar
+            patch
 
-          # 构建 FreeFileSync
-          export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig
-          make -j$(nproc) CXX=g++
-          mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_x64
-
-      # ========== 原生构建：x86 ==========
-      - name: Build for x86 (native, multilib)
-        if: matrix.arch == 'x86'
+      - name: Build and install wxWidgets 3.1.2 (Windows)
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
         run: |
-          # 安装基础工具
-          sudo apt update
-          sudo apt install -y g++ make pkg-config autoconf automake libtool gettext wget
-
-          # 添加 i386 架构并安装依赖
-          sudo dpkg --add-architecture i386
-          sudo apt update
-          sudo apt install -y \
-            g++-multilib \
-            libboost-all-dev:i386 \
-            libcurl4-openssl-dev:i386 \
-            libssh2-1-dev:i386 \
-            libidn2-dev:i386 \
-            libgtk-3-dev:i386 \
-            libssl-dev:i386
-
-          # 编译 wxWidgets (x86)
+          cd $HOME
           wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
           tar xf wxWidgets-3.1.2.tar.bz2
           cd wxWidgets-3.1.2
-          mkdir gtk-build && cd gtk-build
-          ../configure --disable-shared --enable-unicode --prefix=/usr/local/i686-linux-gnu \
-            --host=i686-linux-gnu --build=x86_64-linux-gnu --with-gtk=3 \
-            CFLAGS="-m32" CXXFLAGS="-m32" LDFLAGS="-m32"
+          mkdir -p build-msw
+          cd build-msw
+          ../configure --disable-shared --enable-unicode --prefix=/mingw64 \
+            --with-msw --with-libpng=builtin --with-libjpeg=builtin --with-libtiff=builtin \
+            --with-expat=builtin --with-zlib=builtin --disable-dependency-tracking
           make -j$(nproc)
-          sudo make install
-          cd ../..
+          make install
 
-          # 修复 zen 头文件路径
-          cd FreeFileSync/FreeFileSync/Source
-          ZEN_PATH=$(find $GITHUB_WORKSPACE/FreeFileSync -type d -name zen | head -1)
-          if [ -n "$ZEN_PATH" ]; then
-            echo "zen directory found at: $ZEN_PATH"
-            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
-            ln -sf "$ZEN_PATH" zen
+      # ---------- 辅助：列出当前目录结构（调试用）----------
+      - name: Show directory structure (Linux)
+        if: matrix.platform == 'linux'
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          echo "Current directory: $(pwd)"
+          echo "Parent directory contents:"
+          ls -la ..
+
+      - name: Show directory structure (Windows)
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          echo "Current directory: $(pwd)"
+          echo "Parent directory contents:"
+          ls -la ..
+
+      # ---------- 修复头文件路径（自动查找 zen 目录）----------
+      - name: Prepare include path (Linux)
+        if: matrix.platform == 'linux'
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          echo "=== Searching for zen directory ==="
+          # 尝试在父目录、祖父目录中查找 zen
+          PARENT=$(dirname "$(pwd)")
+          if [ -d "$PARENT/zen" ]; then
+            ZEN_PATH="$PARENT/zen"
           else
-            echo "ERROR: zen directory not found"
-            exit 1
+            GRANDPARENT=$(dirname "$PARENT")
+            if [ -d "$GRANDPARENT/zen" ]; then
+              ZEN_PATH="$GRANDPARENT/zen"
+            else
+              echo "ERROR: zen directory not found in parent ($PARENT) or grandparent ($GRANDPARENT)"
+              exit 1
+            fi
           fi
+          echo "zen directory found at: $ZEN_PATH"
+          # 将 -I$ZEN_PATH 添加到 CXXFLAGS
+          sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
+          # 同时创建符号链接，以备其他情况
+          ln -sf "$ZEN_PATH" zen
 
-          # 构建 FreeFileSync (x86)
-          export PATH=/usr/local/i686-linux-gnu/bin:$PATH
-          export PKG_CONFIG_PATH=/usr/local/i686-linux-gnu/lib/pkgconfig:/usr/lib/i386-linux-gnu/pkgconfig
-          make -j$(nproc) CXX=g++ CXXFLAGS="-m32" LDFLAGS="-m32"
+      - name: Prepare include path (Windows)
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          echo "=== Searching for zen directory ==="
+          PARENT=$(dirname "$(pwd)")
+          if [ -d "$PARENT/zen" ]; then
+            ZEN_PATH="$PARENT/zen"
+          else
+            GRANDPARENT=$(dirname "$PARENT")
+            if [ -d "$GRANDPARENT/zen" ]; then
+              ZEN_PATH="$GRANDPARENT/zen"
+            else
+              echo "ERROR: zen directory not found in parent ($PARENT) or grandparent ($GRANDPARENT)"
+              exit 1
+            fi
+          fi
+          echo "zen directory found at: $ZEN_PATH"
+          sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
+          ln -sf "$ZEN_PATH" zen
+
+      # ---------- Linux 构建 (x64) ----------
+      - name: Build FreeFileSync for Linux (x64)
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        working-directory: FreeFileSync/FreeFileSync/Source
+        env:
+          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig
+        run: |
+          export PATH=/usr/local/bin:$PATH
+          sed -i 's/\bg++\b/g++/g' Makefile
+          make -j$(nproc)
           mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_x86
+          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_x64
 
-      # ========== Docker+QEMU 构建：armhf ==========
-      - name: Set up QEMU
-        if: matrix.arch == 'arm' || matrix.arch == 'arm64'
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build for armhf (Docker container)
-        if: matrix.arch == 'arm'
+      # ---------- Windows 构建 (x64) ----------
+      - name: Build FreeFileSync for Windows (x64)
+        if: matrix.platform == 'windows' && matrix.arch == 'x64'
+        shell: msys2 {0}
+        working-directory: FreeFileSync/FreeFileSync/Source
+        env:
+          MSYSTEM: MINGW64
+          PKG_CONFIG_PATH: /mingw64/lib/pkgconfig
         run: |
-          docker run --rm --platform linux/arm/v7 \
-            -v $PWD:/workspace -w /workspace \
-            arm32v7/ubuntu:22.04 \
-            bash -c "
-              set -e
-              apt update
-              apt install -y g++ make pkg-config wget \
-                libboost-filesystem-dev libboost-system-dev libboost-thread-dev \
-                libcurl4-openssl-dev libssh2-1-dev libidn2-dev libgtk-3-dev libssl-dev
+          export PATH=/mingw64/bin:$PATH
+          sed -i 's/\bg++\b/g++/g' Makefile
+          make -j$(nproc)
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync.exe $GITHUB_WORKSPACE/artifacts/FreeFileSync_windows_x64.exe
 
-              # 编译 wxWidgets
-              wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
-              tar xf wxWidgets-3.1.2.tar.bz2
-              cd wxWidgets-3.1.2
-              mkdir gtk-build && cd gtk-build
-              ../configure --disable-shared --enable-unicode --prefix=/usr/local --with-gtk=3
-              make -j$(nproc)
-              make install
-              ldconfig
-              cd ../..
-
-              # 修复 zen 头文件路径
-              cd FreeFileSync/FreeFileSync/Source
-              ZEN_PATH=\$(find /workspace/FreeFileSync -type d -name zen | head -1)
-              if [ -n \"\$ZEN_PATH\" ]; then
-                echo \"zen directory found at: \$ZEN_PATH\"
-                sed -i \"s|^\\(CXXFLAGS[[:space:]]*+=\\)|\\1 -I\$ZEN_PATH|\" Makefile
-                ln -sf \$ZEN_PATH zen
-              else
-                echo \"ERROR: zen directory not found\"
-                exit 1
-              fi
-
-              # 构建 FreeFileSync
-              make -j$(nproc) CXX=g++
-              mkdir -p /workspace/artifacts
-              cp ../Build/Bin/FreeFileSync /workspace/artifacts/FreeFileSync_linux_armhf
-            "
-
-      - name: Build for arm64 (Docker container)
-        if: matrix.arch == 'arm64'
-        run: |
-          docker run --rm --platform linux/arm64 \
-            -v $PWD:/workspace -w /workspace \
-            arm64v8/ubuntu:22.04 \
-            bash -c "
-              set -e
-              apt update
-              apt install -y g++ make pkg-config wget \
-                libboost-filesystem-dev libboost-system-dev libboost-thread-dev \
-                libcurl4-openssl-dev libssh2-1-dev libidn2-dev libgtk-3-dev libssl-dev
-
-              # 编译 wxWidgets
-              wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
-              tar xf wxWidgets-3.1.2.tar.bz2
-              cd wxWidgets-3.1.2
-              mkdir gtk-build && cd gtk-build
-              ../configure --disable-shared --enable-unicode --prefix=/usr/local --with-gtk=3
-              make -j$(nproc)
-              make install
-              ldconfig
-              cd ../..
-
-              # 修复 zen 头文件路径
-              cd FreeFileSync/FreeFileSync/Source
-              ZEN_PATH=\$(find /workspace/FreeFileSync -type d -name zen | head -1)
-              if [ -n \"\$ZEN_PATH\" ]; then
-                echo \"zen directory found at: \$ZEN_PATH\"
-                sed -i \"s|^\\(CXXFLAGS[[:space:]]*+=\\)|\\1 -I\$ZEN_PATH|\" Makefile
-                ln -sf \$ZEN_PATH zen
-              else
-                echo \"ERROR: zen directory not found\"
-                exit 1
-              fi
-
-              # 构建 FreeFileSync
-              make -j$(nproc) CXX=g++
-              mkdir -p /workspace/artifacts
-              cp ../Build/Bin/FreeFileSync /workspace/artifacts/FreeFileSync_linux_arm64
-            "
-
-      # ========== 上传构建产物 ==========
+      # ---------- 上传构建产物 ----------
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: FreeFileSync-linux-${{ matrix.arch }}
+          name: FreeFileSync-${{ matrix.platform }}-${{ matrix.arch }}
           path: artifacts/
