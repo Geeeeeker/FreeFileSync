@@ -72,6 +72,22 @@ jobs:
           ref: master
           path: FreeFileSync
 
+      - name: Build wxWidgets from source (if package not available)
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        run: |
+          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
+          tar xf wxWidgets-3.1.2.tar.bz2
+          cd wxWidgets-3.1.2
+          mkdir gtk-build && cd gtk-build
+          # 配置为静态库，确保 wx-config 可用
+          ../configure --disable-shared --enable-unicode --with-gtk=3 --prefix=/usr/local
+          make -j$(nproc)
+          sudo make install
+          # 更新库缓存
+          sudo ldconfig
+          # 验证安装
+          wx-config --version
+    
       # ---------- Linux 依赖安装（完整版）----------
       - name: Install Linux dependencies (x64)
         if: matrix.platform == 'linux' && matrix.arch == 'x64'
