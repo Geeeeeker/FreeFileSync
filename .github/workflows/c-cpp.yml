@@ -23,6 +23,7 @@ jobs:
       - name: Generate build matrix
         id: generate
         run: |
+          # 定义每个平台支持的架构（此处仅 x64，可自行扩展）
           declare -A SUPPORTED=(
             [linux]="x64"
             [windows]="x64"
@@ -58,7 +59,7 @@ jobs:
 
   build:
     needs: setup
-    runs-on: ${{ matrix.platform == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.platform == 'windows' && 'windows-latest' || 'ubuntu-22.04' }}  # 使用 Ubuntu 22.04 以获得较新依赖
     strategy:
       matrix:
         include: ${{ fromJson(needs.setup.outputs.matrix) }}
@@ -72,42 +73,39 @@ jobs:
           ref: master
           path: FreeFileSync
 
-      - name: Build wxWidgets from source (if package not available)
-        if: matrix.platform == 'linux' && matrix.arch == 'x64'
-        run: |
-          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
-          tar xf wxWidgets-3.1.2.tar.bz2
-          cd wxWidgets-3.1.2
-          mkdir gtk-build && cd gtk-build
-          # 配置为静态库，确保 wx-config 可用
-          ../configure --disable-shared --enable-unicode --with-gtk=3 --prefix=/usr/local
-          make -j$(nproc)
-          sudo make install
-          # 更新库缓存
-          sudo ldconfig
-          # 验证安装
-          wx-config --version
-    
-      # ---------- Linux 依赖安装（完整版）----------
-      - name: Install Linux dependencies (x64)
-        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+      # ---------- Linux 依赖安装 ----------
+      - name: Install Linux base dependencies
+        if: matrix.platform == 'linux'
         run: |
           sudo apt update
           sudo apt install -y \
             g++ make \
             libboost-all-dev \
-            libwxgtk3.0-gtk3-dev \
             libcurl4-openssl-dev \
-            libidn2-dev \
             libssh2-1-dev \
+            libidn2-dev \
             libgtk-3-dev \
             pkg-config \
             autoconf automake libtool \
-            gettext
+            gettext \
+            wget
 
-      # ---------- Windows 依赖安装（MSYS2）----------
-      - name: Install Windows dependencies (x64)
-        if: matrix.platform == 'windows' && matrix.arch == 'x64'
+      # 手动编译 wxWidgets 3.1.2（因为 Ubuntu 仓库中可能缺少合适的版本）
+      - name: Build and install wxWidgets 3.1.2 (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
+          tar xf wxWidgets-3.1.2.tar.bz2
+          cd wxWidgets-3.1.2
+          mkdir gtk-build && cd gtk-build
+          ../configure --disable-shared --enable-unicode --prefix=/usr/local
+          make -j$(nproc)
+          sudo make install
+          sudo ldconfig
+
+      # ---------- Windows 依赖安装 ----------
+      - name: Install Windows dependencies (MSYS2)
+        if: matrix.platform == 'windows'
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
@@ -121,22 +119,6 @@ jobs:
             mingw-w64-x86_64-libssh2
             mingw-w64-x86_64-gtk3
             mingw-w64-x86_64-pkg-config
-            mingw-w64-x86_64-autotools
-
-      # ---------- 验证 Linux 环境（确保 pkg-config 和 GTK+ 正常）----------
-      - name: Verify Linux build environment
-        if: matrix.platform == 'linux'
-        run: |
-          echo "=== pkg-config ==="
-          which pkg-config
-          pkg-config --version
-          echo "=== GTK+ 3 ==="
-          pkg-config --modversion gtk+-3.0 || echo "gtk+-3.0 not found"
-          echo "=== wx-config ==="
-          which wx-config
-          wx-config --version
-          echo "=== PKG_CONFIG_PATH ==="
-          echo $PKG_CONFIG_PATH
 
       # ---------- 修复头文件路径（创建符号链接 zen -> ../zen）----------
       - name: Fix include path for Linux
@@ -152,19 +134,22 @@ jobs:
         run: |
           ln -sf ../zen zen
 
-      # ---------- Linux 构建（x64）----------
+      # ---------- Linux 构建 (x64) ----------
       - name: Build FreeFileSync for Linux (x64)
         if: matrix.platform == 'linux' && matrix.arch == 'x64'
         working-directory: FreeFileSync/FreeFileSync/Source
         env:
-          PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig
+          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig
         run: |
+          # 确保 wx-config 在 PATH 中
+          export PATH=/usr/local/bin:$PATH
+          # 修改 Makefile 中编译器为 g++（默认）
           sed -i 's/\bg++\b/g++/g' Makefile
           make -j$(nproc)
           mkdir -p $GITHUB_WORKSPACE/artifacts/
           cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_x64
 
-      # ---------- Windows 构建（x64）----------
+      # ---------- Windows 构建 (x64) ----------
       - name: Build FreeFileSync for Windows (x64)
         if: matrix.platform == 'windows' && matrix.arch == 'x64'
         shell: msys2 {0}
