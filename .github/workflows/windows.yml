@@ -108,7 +108,7 @@ jobs:
           make -j$(nproc)
           make install
 
-      # ---------- 修复头文件路径（智能查找 zen 目录）----------
+      # ---------- 修复头文件路径（关键修复）----------
       - name: Prepare include path (Windows)
         shell: msys2 {0}
         working-directory: FreeFileSync/FreeFileSync/Source
@@ -128,24 +128,41 @@ jobs:
             exit 1
           fi
           echo "zen directory found at: $ZEN_PATH"
+          ZEN_PARENT=$(dirname "$ZEN_PATH")
+          echo "zen parent directory: $ZEN_PARENT"
 
-          # 1. 将 -I 写入 Makefile（兼容原有逻辑）
-          if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
-            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
-          else
-            echo "CXXFLAGS += -I$ZEN_PATH" >> Makefile
-          fi
+          # 将父目录添加到 Makefile 的 CXXFLAGS 和 CPPFLAGS 中
+          for var in CXXFLAGS CPPFLAGS; do
+            if grep -q "^${var}[[:space:]]*+=" Makefile; then
+              sed -i "s|^\(${var}[[:space:]]*+=\)|\1 -I$ZEN_PARENT|" Makefile
+            else
+              echo "${var} += -I$ZEN_PARENT" >> Makefile
+            fi
+          done
 
-          # 2. 设置环境变量，确保编译器总能找到（即使 Makefile 覆盖）
-          echo "CXXFLAGS=\"-I$ZEN_PATH \$CXXFLAGS\"" >> $GITHUB_ENV
-          echo "CPPFLAGS=\"-I$ZEN_PATH \$CPPFLAGS\"" >> $GITHUB_ENV
+          # 创建符号链接，以应对某些直接引用路径的情况
+          ln -sf "$ZEN_PATH" zen
 
-          # 3. 在临时构建目录创建符号链接（避免构建过程切换目录后找不到）
-          #   根据错误信息，临时目录为 /tmp/FreeFileSync_x86_64_Make/ffs/src/
+          # 在临时构建目录也创建符号链接（根据错误日志中的路径）
           TMP_BUILD_DIR="/tmp/FreeFileSync_x86_64_Make/ffs/src"
           mkdir -p "$TMP_BUILD_DIR"
           ln -sf "$ZEN_PATH" "$TMP_BUILD_DIR/zen"
           echo "Created symlink in $TMP_BUILD_DIR/zen"
+
+          # 清除可能污染的环境变量
+          echo "CXXFLAGS=" >> $GITHUB_ENV
+          echo "CPPFLAGS=" >> $GITHUB_ENV
+
+      # 可选：抑制不存在的包含目录警告（如 /usr/include/gtk-3.0）
+      - name: Suppress missing include warnings
+        shell: msys2 {0}
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
+            sed -i 's|^\(CXXFLAGS[[:space:]]*+=\)|\1 -Wno-missing-include-dirs|' Makefile
+          else
+            echo "CXXFLAGS += -Wno-missing-include-dirs" >> Makefile
+          fi
 
       # ---------- Windows 构建 (x64) ----------
       - name: Build FreeFileSync for Windows (x64)
@@ -153,18 +170,17 @@ jobs:
         working-directory: FreeFileSync/FreeFileSync/Source
         env:
           MSYSTEM: MINGW64
-          # 强制 pkg-config 只使用 Mingw64 的库路径，避免错误引用 /usr/include
           PKG_CONFIG_LIBDIR: /mingw64/lib/pkgconfig
+          WX_CONFIG: /mingw64/bin/wx-config   # 确保 wx-config 使用正确的安装
         run: |
           export PATH=/mingw64/bin:$PATH
-          # 确保编译器为 g++（Makefile 中可能写死 g++，无需修改）
-          # 可选：检查 pkg-config 是否正确
-          echo "Checking gtk+-3.0 cflags:"
-          pkg-config --cflags gtk+-3.0
-
+          # 可选：打印调试信息
+          echo "CXXFLAGS from Makefile:"
+          grep '^CXXFLAGS' Makefile || true
+          echo "wx-config cxxflags:"
+          wx-config --cxxflags
           # 执行构建
           make -j$(nproc)
-
           # 复制产物
           mkdir -p $GITHUB_WORKSPACE/artifacts/
           cp ../Build/Bin/FreeFileSync.exe $GITHUB_WORKSPACE/artifacts/FreeFileSync_windows_x64.exe
