@@ -181,19 +181,36 @@ jobs:
           # 将 Makefile 中的 g++ 替换为 clang++
           sed -i '' 's/\bg++\b/clang++/g' Makefile
 
-          # 查找并替换 Makefile 中所有指向临时目录的路径
+          # 输出完整 Makefile 以便调试
+          echo "=== Full Makefile before patching ==="
+          cat Makefile
+
+          # 彻底替换所有硬编码的临时目录路径
           echo "=== Patching Makefile to remove /var/folders paths ==="
           cp Makefile Makefile.bak
+
+          # 替换所有包含 /var/folders/ 的路径为 ./obj
           sed -i '' 's|/var/folders/[^ ]*/FreeFileSync_[^ ]*_Make|./obj|g' Makefile
+
+          # 替换可能使用的 TMPDIR 变量引用
           sed -i '' 's|\$$(TMPDIR)/FreeFileSync|./obj/FreeFileSync|g' Makefile
           sed -i '' 's|\$${TMPDIR}/FreeFileSync|./obj/FreeFileSync|g' Makefile
+
+          # 如果存在定义 TMPDIR 或 BUILD_DIR 的行，强制覆盖为 ./obj
+          sed -i '' '/^[[:space:]]*TMPDIR[[:space:]]*[:?]?=/ s|=.*| = ./obj|' Makefile
+          sed -i '' '/^[[:space:]]*BUILD_DIR[[:space:]]*[:?]?=/ s|=.*| = ./obj|' Makefile
+          sed -i '' '/^[[:space:]]*OBJDIR[[:space:]]*[:?]?=/ s|=.*| = ./obj|' Makefile
+          sed -i '' '/^[[:space:]]*OUTDIR[[:space:]]*[:?]?=/ s|=.*| = ./obj|' Makefile
+
+          # 额外处理：如果规则中直接使用 mkdir -p 硬编码路径，我们可能无法完全替换，但上述 sed 已覆盖常见模式
+
           echo "=== Makefile after patching (first 20 lines) ==="
           head -20 Makefile
 
           # 创建输出目录
           mkdir -p obj
 
-          # 构建
+          # 构建，传递所有可能的输出变量
           echo "=== Starting build ==="
           make V=1 -j$(sysctl -n hw.logicalcpu) \
               OBJDIR=./obj \
