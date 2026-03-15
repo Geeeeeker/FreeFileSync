@@ -163,23 +163,31 @@ jobs:
           mkdir -p "$BUILD_DIR"
           echo "Copying source files to build directory..."
           cp -r . "$BUILD_DIR"
+          
+          # 调试：列出构建目录内容
+          echo "=== Contents of $BUILD_DIR ==="
+          ls -la "$BUILD_DIR"
+          echo "=== Contents of $BUILD_DIR/zen (if exists) ==="
+          ls -la "$BUILD_DIR/zen" || echo "zen directory not found"
+          
           cd "$BUILD_DIR/Source"
-
-          # 在构建目录中重新应用补丁（针对实际文件位置）
+          
+          # 在构建目录中重新应用补丁（使用绝对路径）
           echo "=== Ensuring atomic patch in build directory ==="
-          if [ -f ../zen/string_base.h ]; then
-            if ! grep -q '#include <atomic>' ../zen/string_base.h; then
-              echo '#include <atomic>' | cat - ../zen/string_base.h > temp && mv temp ../zen/string_base.h
-              echo "Reapplied atomic patch in build directory (../zen/string_base.h)."
+          ZEN_PATH="$BUILD_DIR/zen"
+          if [ -f "$ZEN_PATH/string_base.h" ]; then
+            if ! grep -q '#include <atomic>' "$ZEN_PATH/string_base.h"; then
+              echo '#include <atomic>' | cat - "$ZEN_PATH/string_base.h" > temp && mv temp "$ZEN_PATH/string_base.h"
+              echo "Reapplied atomic patch in build directory."
             else
               echo "atomic header already patched in build directory."
             fi
           else
-            echo "ERROR: ../zen/string_base.h not found in build directory!"
+            echo "ERROR: $ZEN_PATH/string_base.h not found in build directory!"
             exit 1
           fi
 
-          # 重新创建软链接，确保指向构建目录内的 zen（而不是原始路径）
+          # 重新创建软链接，确保指向构建目录内的 zen
           rm -f zen
           ln -sf ../zen zen
           echo "Created symlink zen -> ../zen"
@@ -194,7 +202,7 @@ jobs:
 
           # 替换所有绝对路径的 -I 指向原始 zen 目录为相对路径 -I./zen
           echo "=== Replacing absolute zen include paths with relative ==="
-          sed -i '' 's|-I/Users/runner/work/FreeFileSync/FreeFileSync/FreeFileSync/zen|-I./zen|g' Makefile
+          sed -i '' "s|-I/Users/runner/work/FreeFileSync/FreeFileSync/FreeFileSync/zen|-I./zen|g" Makefile
 
           # 可选：移除可能引起问题的 gtk+ 相关标志（macOS 不需要）
           sed -i '' '/pkg-config --cflags gtk+-3.0/d' Makefile
