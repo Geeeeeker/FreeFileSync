@@ -1,211 +1,84 @@
-name: Build FreeFileSync (macOS)
+- name: Build FreeFileSync for ${{ matrix.arch }}
+  working-directory: FreeFileSync/FreeFileSync
+  env:
+    ARCH: ${{ matrix.arch }}
+  run: |
+    if [ "$ARCH" = "x86_64" ]; then
+      ARCH_FLAGS="-arch x86_64"
+      HOMEBREW_PREFIX="/usr/local"
+    elif [ "$ARCH" = "arm64" ]; then
+      ARCH_FLAGS="-arch arm64"
+      HOMEBREW_PREFIX="/opt/homebrew"
+    else
+      echo "Unsupported architecture: $ARCH"
+      exit 1
+    fi
 
-on:
-  workflow_dispatch:
-    inputs:
-      architectures:
-        description: 'Target architectures (comma separated: x86_64, arm64)'
-        required: true
-        default: 'x86_64,arm64'
-        type: string
+    export CXX=clang++
+    export CXXFLAGS="$ARCH_FLAGS -std=c++17 -stdlib=libc++ -I$HOMEBREW_PREFIX/include"
+    export LDFLAGS="$ARCH_FLAGS -L$HOMEBREW_PREFIX/lib"
+    export MACOSX_DEPLOYMENT_TARGET=11.0
 
-jobs:
-  setup:
-    runs-on: macos-latest
-    outputs:
-      matrix: ${{ steps.generate.outputs.matrix }}
-    steps:
-      - name: Generate build matrix
-        id: generate
-        run: |
-          SUPPORTED="x86_64 arm64"
-          IFS=',' read -r -a ARCHS <<< "${{ inputs.architectures }}"
-          MATRIX_ENTRIES=()
-          for arch in "${ARCHS[@]}"; do
-            arch=$(echo "$arch" | xargs)
-            if [[ " $SUPPORTED " =~ " $arch " ]]; then
-              MATRIX_ENTRIES+=("{\"arch\":\"$arch\"}")
-            else
-              echo "Warning: $arch is not supported, skipping"
-            fi
-          done
-          if [ ${#MATRIX_ENTRIES[@]} -eq 0 ]; then
-            echo "No valid architectures selected."
-            exit 1
-          fi
-          matrix_json=$(printf '%s\n' "${MATRIX_ENTRIES[@]}" | jq -c -s '.')
-          echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
+    # 创建构建目录并复制整个源码树
+    BUILD_DIR="$GITHUB_WORKSPACE/build_$ARCH"
+    echo "Creating build directory: $BUILD_DIR"
+    mkdir -p "$BUILD_DIR"
+    echo "Copying source files to build directory..."
+    cp -r . "$BUILD_DIR"
+    cd "$BUILD_DIR/Source"
 
-  build:
-    needs: setup
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        include: ${{ fromJson(needs.setup.outputs.matrix) }}
-      fail-fast: false
+    # 再次确保补丁存在
+    if [ -f zen/string_base.h ]; then
+      if ! grep -q '#include <atomic>' zen/string_base.h; then
+        echo '#include <atomic>' | cat - zen/string_base.h > temp && mv temp zen/string_base.h
+        echo "Reapplied atomic patch in build directory."
+      else
+        echo "atomic header already patched in build directory."
+      fi
+    else
+      echo "ERROR: zen/string_base.h not found in build directory!"
+      exit 1
+    fi
 
-    steps:
-      - name: Checkout source code (master branch)
-        uses: actions/checkout@v4
-        with:
-          repository: Geeeeeker/FreeFileSync
-          ref: master
-          path: FreeFileSync
+    # 将 Makefile 中的 g++ 替换为 clang++
+    sed -i '' 's/\bg++\b/clang++/g' Makefile
 
-      - name: Install dependencies via Homebrew
-        run: |
-          brew update
-          brew install boost wxwidgets libssh2 pkg-config
+    # 查找并替换 Makefile 中所有指向临时目录的路径
+    echo "=== Patching Makefile to remove /var/folders paths ==="
+    # 备份原 Makefile
+    cp Makefile Makefile.bak
+    # 替换所有形如 /var/folders/.../FreeFileSync_${ARCH}_Make 的路径为 ./obj
+    sed -i '' 's|/var/folders/[^ ]*/FreeFileSync_[^ ]*_Make|./obj|g' Makefile
+    # 如果还有硬编码的 TMPDIR 使用，也替换为当前目录
+    sed -i '' 's|\$$(TMPDIR)/FreeFileSync|./obj/FreeFileSync|g' Makefile
+    sed -i '' 's|\$${TMPDIR}/FreeFileSync|./obj/FreeFileSync|g' Makefile
+    # 如果有使用 mktemp 命令，将其替换为固定目录（较复杂，先观察）
+    echo "=== Makefile after patching (first 20 lines) ==="
+    head -20 Makefile
 
-      # 第一步：定位 zen 目录并输出路径
-      - name: Find zen directory
-        id: find-zen
-        working-directory: FreeFileSync/FreeFileSync/Source
-        run: |
-          echo "=== Locating zen directory ==="
-          ZEN_PATH=""
-          DIR=$(pwd)
-          while [ "$DIR" != "/" ]; do
-            if [ -d "$DIR/zen" ]; then
-              ZEN_PATH="$DIR/zen"
-              break
-            fi
-            DIR=$(dirname "$DIR")
-          done
-          if [ -z "$ZEN_PATH" ]; then
-            echo "ERROR: zen directory not found!"
-            exit 1
-          fi
-          echo "zen directory found at: $ZEN_PATH"
-          echo "zen_path=$ZEN_PATH" >> $GITHUB_OUTPUT
+    # 创建输出目录
+    mkdir -p obj
 
-      # 修复头文件：在 zen/string_base.h 开头插入 #include <atomic>
-      - name: Apply atomic header patch
-        run: |
-          ZEN_PATH="${{ steps.find-zen.outputs.zen_path }}"
-          echo "Patching $ZEN_PATH/string_base.h"
-          if [ -f "$ZEN_PATH/string_base.h" ]; then
-            if ! grep -q '#include <atomic>' "$ZEN_PATH/string_base.h"; then
-              echo '#include <atomic>' | cat - "$ZEN_PATH/string_base.h" > temp && mv temp "$ZEN_PATH/string_base.h"
-              echo "Patch applied."
-            else
-              echo "File already contains #include <atomic>"
-            fi
-          else
-            echo "string_base.h NOT found at $ZEN_PATH!"
-            exit 1
-          fi
+    # 尝试构建，并传递所有可能的输出目录变量
+    echo "=== Starting build ==="
+    make V=1 -j$(sysctl -n hw.logicalcpu) \
+        OBJDIR=./obj \
+        OUTDIR=./obj \
+        BUILDDIR=./obj \
+        TMPDIR=./obj \
+        WORKDIR=./obj \
+        BUILD_DIR=./obj \
+        OUTPUT_DIR=./obj 2>&1 | tee build.log
 
-      # 验证补丁
-      - name: Verify atomic header patch
-        run: |
-          ZEN_PATH="${{ steps.find-zen.outputs.zen_path }}"
-          echo "=== First 5 lines of $ZEN_PATH/string_base.h ==="
-          head -5 "$ZEN_PATH/string_base.h"
-          if grep -q '#include <atomic>' "$ZEN_PATH/string_base.h"; then
-            echo "✅ atomic header included"
-          else
-            echo "❌ atomic header NOT included"
-            echo '#include <atomic>' | cat - "$ZEN_PATH/string_base.h" > temp && mv temp "$ZEN_PATH/string_base.h"
-            echo "Retry: inserted again"
-            head -5 "$ZEN_PATH/string_base.h"
-          fi
+    # 复制结果
+    mkdir -p $GITHUB_WORKSPACE/artifacts/
+    if [ -f ../Build/Bin/FreeFileSync ]; then
+      cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
+      echo "Binary copied."
+    else
+      echo "Binary not found!"
+      # 列出可能的输出位置以便调试
+      find .. -name "FreeFileSync" -type f 2>/dev/null || true
+    fi
 
-      # 添加包含路径和创建软链接（已在原始源码中生效）
-      - name: Add zen include path and symlink
-        working-directory: FreeFileSync/FreeFileSync/Source
-        run: |
-          ZEN_PATH="${{ steps.find-zen.outputs.zen_path }}"
-          if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
-            sed -i '' "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
-          else
-            echo "CXXFLAGS += -I$ZEN_PATH" >> Makefile
-          fi
-          ln -sf "$ZEN_PATH" zen
-
-      - name: Debug environment
-        working-directory: FreeFileSync/FreeFileSync/Source
-        run: |
-          echo "=== Compiler info ==="
-          clang++ --version
-          echo "=== Makefile content ==="
-          cat Makefile
-          echo "=== Homebrew prefix ==="
-          brew --prefix
-          echo "=== wxWidgets flags ==="
-          wx-config --cxxflags --libs || echo "wx-config not found"
-          echo "=== pkg-config libssh2 ==="
-          pkg-config --cflags --libs libssh2 || echo "libssh2 pc not found"
-          echo "=== Current directory ==="
-          pwd
-          ls -la
-
-      # 构建步骤：复制整个源码树到自定义目录，确保补丁生效
-      - name: Build FreeFileSync for ${{ matrix.arch }}
-        working-directory: FreeFileSync/FreeFileSync
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          if [ "$ARCH" = "x86_64" ]; then
-            ARCH_FLAGS="-arch x86_64"
-            HOMEBREW_PREFIX="/usr/local"
-          elif [ "$ARCH" = "arm64" ]; then
-            ARCH_FLAGS="-arch arm64"
-            HOMEBREW_PREFIX="/opt/homebrew"
-          else
-            echo "Unsupported architecture: $ARCH"
-            exit 1
-          fi
-
-          export CXX=clang++
-          export CXXFLAGS="$ARCH_FLAGS -std=c++17 -stdlib=libc++ -I$HOMEBREW_PREFIX/include"
-          export LDFLAGS="$ARCH_FLAGS -L$HOMEBREW_PREFIX/lib"
-          export MACOSX_DEPLOYMENT_TARGET=11.0
-
-          # 创建构建目录并复制整个源码树（当前目录为 FreeFileSync/FreeFileSync）
-          BUILD_DIR="$GITHUB_WORKSPACE/build_$ARCH"
-          echo "Creating build directory: $BUILD_DIR"
-          mkdir -p "$BUILD_DIR"
-          echo "Copying source files to build directory..."
-          cp -r . "$BUILD_DIR"
-          cd "$BUILD_DIR/Source"
-
-          # 再次确保补丁存在（复制后原始补丁应保留，但以防万一）
-          if [ -f zen/string_base.h ]; then
-            if ! grep -q '#include <atomic>' zen/string_base.h; then
-              echo '#include <atomic>' | cat - zen/string_base.h > temp && mv temp zen/string_base.h
-              echo "Reapplied atomic patch in build directory."
-            else
-              echo "atomic header already patched in build directory."
-            fi
-          else
-            echo "ERROR: zen/string_base.h not found in build directory!"
-            exit 1
-          fi
-
-          # 将 Makefile 中的 g++ 替换为 clang++
-          sed -i '' 's/\bg++\b/clang++/g' Makefile
-
-          # 构建
-          echo "Starting build..."
-          make V=1 -j$(sysctl -n hw.logicalcpu) 2>&1 | tee build.log
-
-          # 复制结果
-          mkdir -p $GITHUB_WORKSPACE/artifacts/
-          if [ -f ../Build/Bin/FreeFileSync ]; then
-            cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
-            echo "Binary copied."
-          else
-            echo "Binary not found!"
-          fi
-
-          # 将构建日志复制到 artifacts 以便上传
-          cp build.log $GITHUB_WORKSPACE/artifacts/build_${{ matrix.arch }}.log
-
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeFileSync-macos-${{ matrix.arch }}-logs
-          path: artifacts/
-          if-no-files-found: warn
+    cp build.log $GITHUB_WORKSPACE/artifacts/build_${{ matrix.arch }}.log
