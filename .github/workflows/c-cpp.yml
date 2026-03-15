@@ -35,13 +35,25 @@ jobs:
         run: |
           if [ ! -f FreeFileSync/Build/Resources.zip ]; then
               echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-              curl -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
-              # 检查文件大小（至少 1MB）
+              # 使用浏览器 User-Agent 下载
+              curl -A "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0" -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
+              
+              # 检查文件大小
               size=$(wc -c < fallback.zip)
               if [ $size -lt 1000000 ]; then
-                  echo "Downloaded file is too small, likely invalid"
+                  echo "Downloaded file is too small ($size bytes), likely invalid. File content preview:"
+                  head -n 20 fallback.zip | cat -A
                   exit 1
               fi
+              
+              # 检查文件类型是否为 ZIP
+              if ! file fallback.zip | grep -qi "Zip archive"; then
+                  echo "Downloaded file is not a ZIP archive. Actual type: $(file fallback.zip)"
+                  echo "First 20 lines:"
+                  head -n 20 fallback.zip | cat -A
+                  exit 1
+              fi
+              
               unzip -q fallback.zip -d fallback
               found=$(find fallback -name "Resources.zip" -print -quit)
               if [ -z "$found" ]; then
@@ -108,12 +120,22 @@ jobs:
         run: |
           if [ ! -f FreeFileSync/Build/Resources.zip ]; then
               echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-              curl -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
+              curl -A "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0" -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
+              
               size=$(wc -c < fallback.zip)
               if [ $size -lt 1000000 ]; then
-                  echo "Downloaded file is too small, likely invalid"
+                  echo "Downloaded file is too small ($size bytes), likely invalid. File content preview:"
+                  head -n 20 fallback.zip | cat -A
                   exit 1
               fi
+              
+              if ! file fallback.zip | grep -qi "Zip archive"; then
+                  echo "Downloaded file is not a ZIP archive. Actual type: $(file fallback.zip)"
+                  echo "First 20 lines:"
+                  head -n 20 fallback.zip | cat -A
+                  exit 1
+              fi
+              
               unzip -q fallback.zip -d fallback
               found=$(find fallback -name "Resources.zip" -print -quit)
               if [ -z "$found" ]; then
@@ -187,12 +209,22 @@ jobs:
         run: |
           if [ ! -f FreeFileSync/Build/Resources.zip ]; then
               echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-              curl -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
+              curl -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 13.0; rv:109.0) Gecko/20100101 Firefox/115.0" -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
+              
               size=$(wc -c < fallback.zip)
               if [ $size -lt 1000000 ]; then
-                  echo "Downloaded file is too small, likely invalid"
+                  echo "Downloaded file is too small ($size bytes), likely invalid. File content preview:"
+                  head -n 20 fallback.zip | cat -A
                   exit 1
               fi
+              
+              if ! file fallback.zip | grep -qi "Zip archive"; then
+                  echo "Downloaded file is not a ZIP archive. Actual type: $(file fallback.zip)"
+                  echo "First 20 lines:"
+                  head -n 20 fallback.zip | cat -A
+                  exit 1
+              fi
+              
               unzip -q fallback.zip -d fallback
               found=$(find fallback -name "Resources.zip" -print -quit)
               if [ -z "$found" ]; then
@@ -240,12 +272,22 @@ jobs:
         run: |
           if [ ! -f FreeFileSync/Build/Resources.zip ]; then
               echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-              curl -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
+              curl -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0; rv:109.0) Gecko/20100101 Firefox/115.0" -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
+              
               size=$(wc -c < fallback.zip)
               if [ $size -lt 1000000 ]; then
-                  echo "Downloaded file is too small, likely invalid"
+                  echo "Downloaded file is too small ($size bytes), likely invalid. File content preview:"
+                  head -n 20 fallback.zip | cat -A
                   exit 1
               fi
+              
+              if ! file fallback.zip | grep -qi "Zip archive"; then
+                  echo "Downloaded file is not a ZIP archive. Actual type: $(file fallback.zip)"
+                  echo "First 20 lines:"
+                  head -n 20 fallback.zip | cat -A
+                  exit 1
+              fi
+              
               unzip -q fallback.zip -d fallback
               found=$(find fallback -name "Resources.zip" -print -quit)
               if [ -z "$found" ]; then
@@ -299,14 +341,28 @@ jobs:
               $fallbackZip = "fallback.zip"
               
               Write-Host "Downloading from $fallbackUrl"
-              curl.exe -L -f -o $fallbackZip $fallbackUrl
+              # 使用浏览器 User-Agent 下载
+              curl.exe -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0" -L -f -o $fallbackZip $fallbackUrl
               if ($LASTEXITCODE -ne 0) {
                   Write-Error "Failed to download fallback source from $fallbackUrl"
                   exit 1
               }
               
-              if ((Get-Item $fallbackZip).Length -lt 1MB) {
-                  Write-Error "Downloaded file is too small, likely invalid"
+              # 检查文件大小
+              $fileSize = (Get-Item $fallbackZip).Length
+              if ($fileSize -lt 1MB) {
+                  Write-Error "Downloaded file is too small ($fileSize bytes), likely invalid. File content preview:"
+                  Get-Content -Path $fallbackZip -TotalCount 20 -Encoding Byte | ForEach-Object { Write-Host "$_ " -NoNewline }
+                  Write-Host ""
+                  exit 1
+              }
+              
+              # 检查文件头是否为 ZIP (PK..)
+              $header = Get-Content -Path $fallbackZip -TotalCount 4 -Encoding Byte
+              if ($header[0] -ne 0x50 -or $header[1] -ne 0x4B) {
+                  Write-Error "Downloaded file is not a ZIP archive (header: $header). First 20 bytes:"
+                  Get-Content -Path $fallbackZip -TotalCount 20 -Encoding Byte | ForEach-Object { Write-Host "$_ " -NoNewline }
+                  Write-Host ""
                   exit 1
               }
               
@@ -369,14 +425,25 @@ jobs:
               $fallbackZip = "fallback.zip"
               
               Write-Host "Downloading from $fallbackUrl"
-              curl.exe -L -f -o $fallbackZip $fallbackUrl
+              curl.exe -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0" -L -f -o $fallbackZip $fallbackUrl
               if ($LASTEXITCODE -ne 0) {
                   Write-Error "Failed to download fallback source from $fallbackUrl"
                   exit 1
               }
               
-              if ((Get-Item $fallbackZip).Length -lt 1MB) {
-                  Write-Error "Downloaded file is too small, likely invalid"
+              $fileSize = (Get-Item $fallbackZip).Length
+              if ($fileSize -lt 1MB) {
+                  Write-Error "Downloaded file is too small ($fileSize bytes), likely invalid. File content preview:"
+                  Get-Content -Path $fallbackZip -TotalCount 20 -Encoding Byte | ForEach-Object { Write-Host "$_ " -NoNewline }
+                  Write-Host ""
+                  exit 1
+              }
+              
+              $header = Get-Content -Path $fallbackZip -TotalCount 4 -Encoding Byte
+              if ($header[0] -ne 0x50 -or $header[1] -ne 0x4B) {
+                  Write-Error "Downloaded file is not a ZIP archive (header: $header). First 20 bytes:"
+                  Get-Content -Path $fallbackZip -TotalCount 20 -Encoding Byte | ForEach-Object { Write-Host "$_ " -NoNewline }
+                  Write-Host ""
                   exit 1
               }
               
@@ -439,14 +506,25 @@ jobs:
               $fallbackZip = "fallback.zip"
               
               Write-Host "Downloading from $fallbackUrl"
-              curl.exe -L -f -o $fallbackZip $fallbackUrl
+              curl.exe -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0" -L -f -o $fallbackZip $fallbackUrl
               if ($LASTEXITCODE -ne 0) {
                   Write-Error "Failed to download fallback source from $fallbackUrl"
                   exit 1
               }
               
-              if ((Get-Item $fallbackZip).Length -lt 1MB) {
-                  Write-Error "Downloaded file is too small, likely invalid"
+              $fileSize = (Get-Item $fallbackZip).Length
+              if ($fileSize -lt 1MB) {
+                  Write-Error "Downloaded file is too small ($fileSize bytes), likely invalid. File content preview:"
+                  Get-Content -Path $fallbackZip -TotalCount 20 -Encoding Byte | ForEach-Object { Write-Host "$_ " -NoNewline }
+                  Write-Host ""
+                  exit 1
+              }
+              
+              $header = Get-Content -Path $fallbackZip -TotalCount 4 -Encoding Byte
+              if ($header[0] -ne 0x50 -or $header[1] -ne 0x4B) {
+                  Write-Error "Downloaded file is not a ZIP archive (header: $header). First 20 bytes:"
+                  Get-Content -Path $fallbackZip -TotalCount 20 -Encoding Byte | ForEach-Object { Write-Host "$_ " -NoNewline }
+                  Write-Host ""
                   exit 1
               }
               
@@ -481,7 +559,7 @@ jobs:
           cd FreeFileSync/Source
           $vcpkgPath = "$pwd\..\..\vcpkg\scripts\buildsystems\vcpkg.cmake"
           msbuild FreeFileSync.sln /p:Configuration=Release /p:Platform=ARM64 `
-            /p:VcpkgTriplet=arm64-windows-static /p:cpkgEnabled=true /p:VcpkgRoot="$pwd\..\..\vcpkg\installed"
+            /p:VcpkgTriplet=arm64-windows-static /p:VcpkgEnabled=true /p:VcpkgRoot="$pwd\..\..\vcpkg\installed"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
