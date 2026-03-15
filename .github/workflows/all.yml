@@ -28,7 +28,7 @@ jobs:
               MATRIX_ENTRIES+=("{\"arch\":\"$arch\"}")
             else
               echo "Warning: $arch is not supported, skipping"
-            fi
+              fi
           done
           if [ ${#MATRIX_ENTRIES[@]} -eq 0 ]; then
             echo "No valid architectures selected."
@@ -58,9 +58,24 @@ jobs:
           brew update
           brew install boost wxwidgets libssh2 pkg-config
 
-      # 可选：如果需要编译wxWidgets而不是使用brew，可以添加步骤
-      # 但brew的wxWidgets应该足够
+      # 修复头文件：确保 zen/string_base.h 包含 <atomic>
+      - name: Apply atomic header patch
+        working-directory: FreeFileSync/FreeFileSync
+        run: |
+          if [ -f zen/string_base.h ]; then
+            if ! grep -q '#include <atomic>' zen/string_base.h; then
+              echo "Adding #include <atomic> to zen/string_base.h"
+              sed -i '' '1i\
+#include <atomic>
+' zen/string_base.h
+            else
+              echo "zen/string_base.h already includes <atomic>"
+            fi
+          else
+            echo "zen/string_base.h not found, skipping patch"
+          fi
 
+      # 定位 zen 目录并修复头文件包含路径
       - name: Locate zen directory and fix includes
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
@@ -93,7 +108,7 @@ jobs:
         working-directory: FreeFileSync/FreeFileSync/Source
         env:
           ARCH: ${{ matrix.arch }}
-          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig
+          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig
         run: |
           # 设置架构标志
           if [ "$ARCH" = "x86_64" ]; then
@@ -105,12 +120,12 @@ jobs:
             exit 1
           fi
 
-          # 确保使用 clang
+          # 确保使用 clang，并启用 C++23 标准（与 Linux 保持一致）
           export CXX=clang++
-          export CXXFLAGS="$ARCH_FLAGS"
+          export CXXFLAGS="$ARCH_FLAGS -std=c++23 -stdlib=libc++"
           export LDFLAGS="$ARCH_FLAGS"
 
-          # 修改 Makefile 中的编译器
+          # 修改 Makefile 中的编译器（将 g++ 替换为 clang++）
           sed -i "" 's/\bg++\b/clang++/g' Makefile
 
           # 编译
