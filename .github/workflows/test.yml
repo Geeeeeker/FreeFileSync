@@ -1,26 +1,20 @@
-name: Build FreeFileSync (Multi-Platform)
+name: Build FreeFileSync
 
 on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: 'Target platforms (comma separated: linux, windows, macos)'
+        description: 'Target platforms (comma separated: linux, windows)'
         required: true
-        default: 'linux,windows,macos'
+        default: 'linux,windows'
         type: string
       architectures:
-        description: 'Target architectures (comma separated: x64, x86, arm, arm64)'
+        description: 'Target architectures (comma separated: x64)'
         required: true
         default: 'x64'
         type: string
 
-env:
-  FFS_VERSION: 14.8
-  WX_VERSION: 3.1.2
-  SOURCE_REPO: Geeeeeker/FreeFileSync   # 您的源码仓库
-
 jobs:
-  # 生成构建矩阵（平台+架构的有效组合）
   setup:
     runs-on: ubuntu-latest
     outputs:
@@ -29,22 +23,11 @@ jobs:
       - name: Generate build matrix
         id: generate
         run: |
-          # 定义每个平台支持的有效架构
+          # 定义每个平台支持的架构（目前仅 x64，可扩展）
           declare -A SUPPORTED=(
-            [linux]="x64 x86 arm arm64"
-            [windows]="x64 x86"           # Windows arm64 暂不支持
-            [macos]="x64 arm64"
+            [linux]="x64"
+            [windows]="x64"
           )
-          # 定义每个架构在对应平台下使用的 runner
-          declare -A RUNNER_MAP
-          RUNNER_MAP["linux,x64"]="ubuntu-22.04"
-          RUNNER_MAP["linux,x86"]="ubuntu-22.04"      # 需要 multilib 或 chroot，此处使用 x86_64 交叉编译
-          RUNNER_MAP["linux,arm"]="ubuntu-22.04-arm"   # 原生 armv7 runner
-          RUNNER_MAP["linux,arm64"]="ubuntu-22.04-arm" # 原生 arm64 runner
-          RUNNER_MAP["windows,x64"]="windows-latest"
-          RUNNER_MAP["windows,x86"]="windows-latest"
-          RUNNER_MAP["macos,x64"]="macos-13"           # Intel
-          RUNNER_MAP["macos,arm64"]="macos-14"         # Apple Silicon
 
           IFS=',' read -r -a PLATFORMS <<< "${{ inputs.platforms }}"
           IFS=',' read -r -a ARCHS <<< "${{ inputs.architectures }}"
@@ -59,12 +42,7 @@ jobs:
             for arch in "${ARCHS[@]}"; do
               arch=$(echo "$arch" | xargs)
               if [[ " ${SUPPORTED[$platform]} " =~ " $arch " ]]; then
-                runner="${RUNNER_MAP["$platform,$arch"]}"
-                if [[ -z "$runner" ]]; then
-                  echo "No runner defined for $platform-$arch, skipping"
-                  continue
-                fi
-                MATRIX_ENTRIES+=("{\"platform\":\"$platform\",\"arch\":\"$arch\",\"runner\":\"$runner\"}")
+                MATRIX_ENTRIES+=("{\"platform\":\"$platform\",\"arch\":\"$arch\"}")
               else
                 echo "Warning: $arch is not supported on $platform, skipping"
               fi
@@ -81,214 +59,164 @@ jobs:
 
   build:
     needs: setup
-    runs-on: ${{ matrix.runner }}
+    # 注意：若需支持 arm64，可将 runner 改为 ubuntu-22.04-arm（需 GitHub 托管）并相应调整 apt 包名
+    runs-on: ${{ matrix.platform == 'windows' && 'windows-latest' || 'ubuntu-22.04' }}
     strategy:
       matrix:
         include: ${{ fromJson(needs.setup.outputs.matrix) }}
       fail-fast: false
 
     steps:
-      - name: Checkout source code
+      - name: Checkout source code (version14 branch)
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.SOURCE_REPO }}
-          ref: master
-          path: source
+          repository: Geeeeeker/FreeFileSync
+          ref: version14
+          path: FreeFileSync
 
-      # ---------- 通用：显示目录结构，便于调试 ----------
-      - name: Show directory structure
-        run: |
-          echo "Current directory: $(pwd)"
-          ls -la source/
-          echo "--- source/FreeFileSync (if exists) ---"
-          ls -la source/FreeFileSync || true
-          echo "--- source/zen (if exists) ---"
-          ls -la source/zen || true
-
-      # ---------- Linux 专用步骤 ----------
-      - name: Setup Linux dependencies
-        if: startsWith(matrix.platform, 'linux')
-        run: |
-          sudo apt update
-          # 基础编译工具
-          sudo apt install -y g++ make pkg-config autoconf automake libtool gettext wget
-          # 通用库
-          sudo apt install -y libboost-all-dev libcurl4-openssl-dev libssh2-1-dev libidn2-dev libgtk-3-dev
-        shell: bash
-
-      - name: Prepare Linux multiarch for x86/arm builds
-        if: matrix.platform == 'linux' && matrix.arch == 'x86'
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt update
-          sudo apt install -y g++-multilib libboost-all-dev:i386 libcurl4-openssl-dev:i386 libssh2-1-dev:i386 libidn2-dev:i386 libgtk-3-dev:i386
-        shell: bash
-
-      - name: Prepare Linux armhf for armv7 builds
-        if: matrix.platform == 'linux' && matrix.arch == 'arm'
-        run: |
-          sudo dpkg --add-architecture armhf
-          sudo apt update
-          sudo apt install -y crossbuild-essential-armhf libboost-all-dev:armhf libcurl4-openssl-dev:armhf libssh2-1-dev:armhf libidn2-dev:armhf libgtk-3-dev:armhf
-        shell: bash
-
-      - name: Build wxWidgets 3.1.2 (Linux)
+      # ---------- Linux 依赖安装 ----------
+      - name: Install Linux base dependencies
         if: matrix.platform == 'linux'
         run: |
-          wget https://github.com/wxWidgets/wxWidgets/releases/download/v${{ env.WX_VERSION }}/wxWidgets-${{ env.WX_VERSION }}.tar.bz2
-          tar xf wxWidgets-${{ env.WX_VERSION }}.tar.bz2
-          cd wxWidgets-${{ env.WX_VERSION }}
+          sudo apt update
+          sudo apt install -y \
+            g++ make \
+            libboost-all-dev \
+            libcurl4-openssl-dev \
+            libssh2-1-dev \
+            libidn2-dev \
+            libgtk-3-dev \
+            pkg-config \
+            autoconf automake libtool \
+            gettext \
+            wget
+
+      # 手动编译 wxWidgets 3.1.2（Linux）
+      - name: Build and install wxWidgets 3.1.2 (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
+          tar xf wxWidgets-3.1.2.tar.bz2
+          cd wxWidgets-3.1.2
           mkdir gtk-build && cd gtk-build
-          # 根据架构设置不同配置
-          CONFIG_FLAGS="--disable-shared --enable-unicode --prefix=/usr/local"
-          if [[ "${{ matrix.arch }}" == "x86" ]]; then
-            CONFIG_FLAGS="$CONFIG_FLAGS --host=i686-linux-gnu CFLAGS=-m32 CXXFLAGS=-m32 LDFLAGS=-m32"
-          elif [[ "${{ matrix.arch }}" == "arm" ]]; then
-            CONFIG_FLAGS="$CONFIG_FLAGS --host=arm-linux-gnueabihf"
-          elif [[ "${{ matrix.arch }}" == "arm64" ]]; then
-            CONFIG_FLAGS="$CONFIG_FLAGS --host=aarch64-linux-gnu"
-          fi
-          ../configure $CONFIG_FLAGS
+          ../configure --disable-shared --enable-unicode --prefix=/usr/local
           make -j$(nproc)
           sudo make install
           sudo ldconfig
-        shell: bash
 
-      # ---------- Windows 专用步骤 (MSYS2) ----------
-      - name: Setup MSYS2 (Windows)
+      # ---------- Windows 依赖安装 (MSYS2) ----------
+      - name: Install Windows base dependencies (MSYS2)
         if: matrix.platform == 'windows'
         uses: msys2/setup-msys2@v2
         with:
-          msystem: ${{ matrix.arch == 'x64' && 'MINGW64' || 'MINGW32' }}
+          msystem: MINGW64
           update: true
           install: >-
-            mingw-w64-${{ matrix.arch == 'x64' && 'x86_64' || 'i686' }}-gcc
-            mingw-w64-${{ matrix.arch == 'x64' && 'x86_64' || 'i686' }}-make
-            mingw-w64-${{ matrix.arch == 'x64' && 'x86_64' || 'i686' }}-boost
-            mingw-w64-${{ matrix.arch == 'x64' && 'x86_64' || 'i686' }}-curl
-            mingw-w64-${{ matrix.arch == 'x64' && 'x86_64' || 'i686' }}-libssh2
-            mingw-w64-${{ matrix.arch == 'x64' && 'x86_64' || 'i686' }}-gtk3
-            mingw-w64-${{ matrix.arch == 'x64' && 'x86_64' || 'i686' }}-pkg-config
-            mingw-w64-${{ matrix.arch == 'x64' && 'x86_64' || 'i686' }}-openssl
-            mingw-w64-${{ matrix.arch == 'x64' && 'x86_64' || 'i686' }}-autotools
-            wget tar patch
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-boost
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-libssh2
+            mingw-w64-x86_64-gtk3
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-autotools
+            wget
+            tar
+            patch
 
-      - name: Build wxWidgets 3.1.2 (Windows)
+      # Windows 下手动编译 wxWidgets 3.1.2（带 --disable-dependency-tracking）
+      - name: Build and install wxWidgets 3.1.2 (Windows)
         if: matrix.platform == 'windows'
         shell: msys2 {0}
         run: |
           cd $HOME
-          wget https://github.com/wxWidgets/wxWidgets/releases/download/v${{ env.WX_VERSION }}/wxWidgets-${{ env.WX_VERSION }}.tar.bz2
-          tar xf wxWidgets-${{ env.WX_VERSION }}.tar.bz2
-          cd wxWidgets-${{ env.WX_VERSION }}
+          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
+          tar xf wxWidgets-3.1.2.tar.bz2
+          cd wxWidgets-3.1.2
           mkdir -p build-msw
           cd build-msw
-          ../configure --disable-shared --enable-unicode --prefix=$MINGW_PREFIX \
+          ../configure --disable-shared --enable-unicode --prefix=/mingw64 \
             --with-msw --with-libpng=builtin --with-libjpeg=builtin --with-libtiff=builtin \
             --with-expat=builtin --with-zlib=builtin --disable-dependency-tracking
           make -j$(nproc)
           make install
 
-      # ---------- macOS 专用步骤 (Homebrew) ----------
-      - name: Install macOS dependencies
-        if: matrix.platform == 'macos'
+      # ---------- 修复头文件路径：创建符号链接到仓库根目录下的各个组件目录 ----------
+      # 这些目录包含所需头文件：zen, zenXml, xBRZ, wx+, libssh2, libcurl
+      - name: Prepare include symlinks (Linux)
+        if: matrix.platform == 'linux'
+        working-directory: FreeFileSync/FreeFileSync/Source
         run: |
-          brew update
-          brew install boost curl libssh2 wxwidgets
-        shell: bash
+          # 定义需要链接的目录列表（相对于仓库根目录 FreeFileSync/）
+          dirs="zen zenXml xBRZ wx+ libssh2 libcurl"
+          for d in $dirs; do
+            target="../../$d"        # 源文件实际位置（从 Source 目录出发）
+            link="$d"                # 在当前目录下创建同名符号链接
+            if [ -e "$target" ]; then
+              echo "Creating symlink: $link -> $target"
+              ln -sf "$target" "$link"
+            else
+              echo "Warning: target $target does not exist, skipping"
+            fi
+          done
+          # 可选：同时创建指向 wx+ 目录的符号链接（如果源码中直接引用 "wx+/xxx.h"）
+          # 但通常源码中会使用相对路径或 -I，为保险再创建一个
+          if [ -d "../../wx+" ]; then
+            ln -sf "../../wx+" wx+
+          fi
 
-      # ---------- 统一修复：zen 目录路径 ----------
-      - name: Fix zen include path
-        working-directory: source
-        run: |
-          echo "Searching for zen directory..."
-          # 常见位置：源代码根目录下的 zen/ 或 FreeFileSync/zen/
-          if [ -d "zen" ]; then
-            ZEN_PATH="$(pwd)/zen"
-          elif [ -d "FreeFileSync/zen" ]; then
-            ZEN_PATH="$(pwd)/FreeFileSync/zen"
-          else
-            echo "ERROR: zen directory not found!"
-            exit 1
-          fi
-          echo "zen found at: $ZEN_PATH"
-          # 修正 Makefile：确保 CXXFLAGS 包含 -I$ZEN_PATH
-          MAKEFILE="FreeFileSync/Source/Makefile"
-          if [ -f "$MAKEFILE" ]; then
-            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" "$MAKEFILE"
-          else
-            echo "Makefile not found at $MAKEFILE, creating symlink as fallback"
-            ln -sf "$ZEN_PATH" FreeFileSync/Source/zen
-          fi
-        shell: bash
-
-      # ---------- 应用代码修改（解决编译错误）----------
-      - name: Apply code tweaks (for older libcurl/libssh2)
-        working-directory: source/FreeFileSync/Source
-        run: |
-          # 根据 README 中的修改，但版本 14.8 可能需要不同的调整
-          # 这里保留原修改作为示例，您可能需要根据实际编译错误调整
-          if [ -f "afs/libcurl/curl_wrap.h" ]; then
-            sed -i '/CURLE_OBSOLETE51/d; /CURLE_RECURSIVE_API_CALL/d' afs/libcurl/curl_wrap.h
-          fi
-          if [ -f "afs/sftp.cpp" ]; then
-            grep -q "MAX_SFTP_OUTGOING_SIZE" afs/sftp.cpp || \
-              sed -i '58i#define MAX_SFTP_OUTGOING_SIZE 30000\n#define MAX_SFTP_READ_SIZE 30000' afs/sftp.cpp
-            grep -q "LIBSSH2_SFTP_DEFAULT_MODE" afs/sftp.cpp || \
-              sed -i '1662i#define LIBSSH2_SFTP_DEFAULT_MODE -1' afs/sftp.cpp
-          fi
-        shell: bash
-
-      # ---------- 编译 ----------
-      # Windows 构建（使用 MSYS2）
-      - name: Build FreeFileSync (Windows)
+      - name: Prepare include symlinks (Windows)
         if: matrix.platform == 'windows'
-        working-directory: source/FreeFileSync/Source
         shell: msys2 {0}
-        env:
-          CXXFLAGS: ${{ matrix.arch == 'x86' && '-m32' || '' }}
-          LDFLAGS: ${{ matrix.arch == 'x86' && '-m32' || '' }}
+        working-directory: FreeFileSync/FreeFileSync/Source
         run: |
-          make -j$(nproc)
-
-      # Linux / macOS 构建（使用 bash）
-      - name: Build FreeFileSync (Unix)
-        if: matrix.platform != 'windows'
-        working-directory: source/FreeFileSync/Source
-        env:
-          CXXFLAGS: ${{ matrix.platform == 'linux' && matrix.arch == 'x86' && '-m32' || '' }}
-          LDFLAGS: ${{ matrix.platform == 'linux' && matrix.arch == 'x86' && '-m32' || '' }}
-        run: |
-          make -j$(nproc)
-
-      # ---------- 收集产物 ----------
-      - name: Gather artifacts
-        run: |
-          mkdir -p artifacts
-          if [ -f "source/FreeFileSync/Build/Bin/FreeFileSync" ]; then
-            cp source/FreeFileSync/Build/Bin/FreeFileSync artifacts/FreeFileSync_${{ matrix.platform }}_${{ matrix.arch }}
-          elif [ -f "source/FreeFileSync/Build/Bin/FreeFileSync.exe" ]; then
-            cp source/FreeFileSync/Build/Bin/FreeFileSync.exe artifacts/FreeFileSync_${{ matrix.platform }}_${{ matrix.arch }}.exe
-          else
-            echo "Binary not found!"
-            exit 1
+          dirs="zen zenXml xBRZ wx+ libssh2 libcurl"
+          for d in $dirs; do
+            target="../../$d"
+            link="$d"
+            if [ -e "$target" ]; then
+              echo "Creating symlink: $link -> $target"
+              ln -sf "$target" "$link"
+            else
+              echo "Warning: target $target does not exist, skipping"
+            fi
+          done
+          if [ -d "../../wx+" ]; then
+            ln -sf "../../wx+" wx+
           fi
-        shell: bash
 
-      # ---------- 简单测试 ----------
-      - name: Test binary (version)
+      # ---------- Linux 构建 (x64) ----------
+      - name: Build FreeFileSync for Linux (x64)
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        working-directory: FreeFileSync/FreeFileSync/Source
+        env:
+          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig
         run: |
-          if [[ "${{ matrix.platform }}" == "windows" ]]; then
-            # Windows 下使用 wine 或直接运行（需要 PowerShell）
-            echo "Windows test skipped in this example (use wine if needed)"
-          else
-            chmod +x artifacts/FreeFileSync_${{ matrix.platform }}_${{ matrix.arch }}
-            artifacts/FreeFileSync_${{ matrix.platform }}_${{ matrix.arch }} --version || echo "Binary executed but exit code ignored"
-          fi
-        shell: bash
-        continue-on-error: true
+          export PATH=/usr/local/bin:$PATH
+          # 确保编译器为 g++
+          sed -i 's/\bg++\b/g++/g' Makefile
+          make -j$(nproc)
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_x64
 
-      # ---------- 上传产物 ----------
+      # ---------- Windows 构建 (x64) ----------
+      - name: Build FreeFileSync for Windows (x64)
+        if: matrix.platform == 'windows' && matrix.arch == 'x64'
+        shell: msys2 {0}
+        working-directory: FreeFileSync/FreeFileSync/Source
+        env:
+          MSYSTEM: MINGW64
+          PKG_CONFIG_PATH: /mingw64/lib/pkgconfig
+        run: |
+          export PATH=/mingw64/bin:$PATH
+          # 确保编译器为 g++
+          sed -i 's/\bg++\b/g++/g' Makefile
+          make -j$(nproc)
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync.exe $GITHUB_WORKSPACE/artifacts/FreeFileSync_windows_x64.exe
+
+      # ---------- 上传构建产物 ----------
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
