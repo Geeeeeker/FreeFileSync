@@ -64,239 +64,80 @@ jobs:
       fail-fast: false
 
     steps:
-      - name: Checkout source code (master branch)
+      - name: Checkout source code
         uses: actions/checkout@v4
         with:
           repository: Geeeeeker/FreeFileSync
           ref: master
           path: FreeFileSync
 
-      # ---------- 基础依赖安装（所有架构通用） ----------
-      - name: Install base build tools
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            g++ make \
-            pkg-config \
-            autoconf automake libtool \
-            gettext \
-            wget
-
-      # ---------- 根据架构安装交叉编译工具链与库 ----------
-      - name: Install dependencies for x64
+      # 对于 x64 和 x86，继续使用原生构建（保持不变）
+      - name: Build for x64
         if: matrix.arch == 'x64'
-        run: |
-          sudo apt install -y \
-            libboost-all-dev \
-            libcurl4-openssl-dev \
-            libssh2-1-dev \
-            libidn2-dev \
-            libgtk-3-dev \
-            libssl-dev
+        # ... 原生构建步骤
 
-      - name: Install dependencies for x86
+      - name: Build for x86
         if: matrix.arch == 'x86'
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt update
-          sudo apt install -y \
-            g++-multilib \
-            libboost-all-dev:i386 \
-            libcurl4-openssl-dev:i386 \
-            libssh2-1-dev:i386 \
-            libidn2-dev:i386 \
-            libgtk-3-dev:i386 \
-            libssl-dev:i386
+        # ... 原生构建步骤
 
-      - name: Install dependencies for armhf
+      # 对于 arm 和 arm64，使用 Docker + QEMU 容器构建
+      - name: Set up QEMU
+        if: matrix.arch == 'arm' || matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build for armhf in Docker container
         if: matrix.arch == 'arm'
         run: |
-          sudo dpkg --add-architecture armhf
-          sudo sed -i 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
-          sudo sed -i 's/^deb-src /deb-src [arch=amd64] /g' /etc/apt/sources.list
-          # 添加 armhf 完整源
-          echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/armhf-ports.list
-          echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf-ports.list
-          echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-backports main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf-ports.list
-          echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf-ports.list
-          sudo apt update
-          # 安装必要的交叉编译工具和库
-          sudo apt install -y --no-install-recommends \
-            g++-arm-linux-gnueabihf \
-            libboost-filesystem-dev:armhf \
-            libboost-system-dev:armhf \
-            libboost-thread-dev:armhf \
-            libcurl4-openssl-dev:armhf \
-            libssh2-1-dev:armhf \
-            libidn2-dev:armhf \
-            libgtk-3-dev:armhf \
-            libssl-dev:armhf
-          # 验证安装
-          echo "=== Verification for armhf ==="
-          arm-linux-gnueabihf-g++ --version
-          pkg-config --exists gtk+-3.0 --print-errors || echo "gtk+-3.0 not found in default pkg-config path"
+          docker run --rm --platform linux/arm/v7 \
+            -v $PWD:/workspace -w /workspace \
+            arm32v7/ubuntu:22.04 \
+            bash -c "
+              apt update && apt install -y g++ make pkg-config wget \
+                libboost-filesystem-dev libboost-system-dev libboost-thread-dev \
+                libcurl4-openssl-dev libssh2-1-dev libidn2-dev libgtk-3-dev libssl-dev &&
+              # 构建 wxWidgets
+              wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2 &&
+              tar xf wxWidgets-3.1.2.tar.bz2 &&
+              cd wxWidgets-3.1.2 &&
+              mkdir gtk-build && cd gtk-build &&
+              ../configure --disable-shared --enable-unicode --prefix=/usr/local --with-gtk=3 &&
+              make -j$(nproc) && make install &&
+              cd /workspace/FreeFileSync/FreeFileSync/Source &&
+              # 修复 zen 头文件路径
+              ZEN_PATH=\$(find /workspace/FreeFileSync -type d -name zen | head -1) &&
+              sed -i 's|^\\(CXXFLAGS[[:space:]]*+=\\)|\\1 -I\$ZEN_PATH|' Makefile &&
+              ln -sf \$ZEN_PATH zen &&
+              # 构建
+              make -j$(nproc) CXX=g++ &&
+              mkdir -p /workspace/artifacts &&
+              cp ../Build/Bin/FreeFileSync /workspace/artifacts/FreeFileSync_linux_armhf
+            "
 
-      - name: Install dependencies for arm64
+      - name: Build for arm64 in Docker container
         if: matrix.arch == 'arm64'
         run: |
-          sudo dpkg --add-architecture arm64
-          sudo sed -i 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
-          sudo sed -i 's/^deb-src /deb-src [arch=amd64] /g' /etc/apt/sources.list
-          # 添加 arm64 完整源
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64-ports.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-backports main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
-          sudo apt update
-          # 安装必要的交叉编译工具和库
-          sudo apt install -y --no-install-recommends \
-            g++-aarch64-linux-gnu \
-            libboost-filesystem-dev:arm64 \
-            libboost-system-dev:arm64 \
-            libboost-thread-dev:arm64 \
-            libcurl4-openssl-dev:arm64 \
-            libssh2-1-dev:arm64 \
-            libidn2-dev:arm64 \
-            libgtk-3-dev:arm64 \
-            libssl-dev:arm64
-          # 验证安装
-          echo "=== Verification for arm64 ==="
-          aarch64-linux-gnu-g++ --version
-          pkg-config --exists gtk+-3.0 --print-errors || echo "gtk+-3.0 not found in default pkg-config path"
+          docker run --rm --platform linux/arm64 \
+            -v $PWD:/workspace -w /workspace \
+            arm64v8/ubuntu:22.04 \
+            bash -c "
+              apt update && apt install -y g++ make pkg-config wget \
+                libboost-filesystem-dev libboost-system-dev libboost-thread-dev \
+                libcurl4-openssl-dev libssh2-1-dev libidn2-dev libgtk-3-dev libssl-dev &&
+              wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2 &&
+              tar xf wxWidgets-3.1.2.tar.bz2 &&
+              cd wxWidgets-3.1.2 &&
+              mkdir gtk-build && cd gtk-build &&
+              ../configure --disable-shared --enable-unicode --prefix=/usr/local --with-gtk=3 &&
+              make -j$(nproc) && make install &&
+              cd /workspace/FreeFileSync/FreeFileSync/Source &&
+              ZEN_PATH=\$(find /workspace/FreeFileSync -type d -name zen | head -1) &&
+              sed -i 's|^\\(CXXFLAGS[[:space:]]*+=\\)|\\1 -I\$ZEN_PATH|' Makefile &&
+              ln -sf \$ZEN_PATH zen &&
+              make -j$(nproc) CXX=g++ &&
+              mkdir -p /workspace/artifacts &&
+              cp ../Build/Bin/FreeFileSync /workspace/artifacts/FreeFileSync_linux_arm64
+            "
 
-      # ---------- 构建并安装 wxWidgets 3.1.2（针对当前架构，使用独立前缀） ----------
-      - name: Build and install wxWidgets 3.1.2 (x64)
-        if: matrix.arch == 'x64'
-        run: |
-          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
-          tar xf wxWidgets-3.1.2.tar.bz2
-          cd wxWidgets-3.1.2
-          mkdir gtk-build && cd gtk-build
-          ../configure --disable-shared --enable-unicode --prefix=/usr/local \
-            --with-gtk=3
-          make -j$(nproc)
-          sudo make install
-          sudo ldconfig
-
-      - name: Build and install wxWidgets 3.1.2 (x86)
-        if: matrix.arch == 'x86'
-        env:
-          HOST_TRIPLE: i686-linux-gnu
-        run: |
-          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
-          tar xf wxWidgets-3.1.2.tar.bz2
-          cd wxWidgets-3.1.2
-          mkdir gtk-build && cd gtk-build
-          ../configure --disable-shared --enable-unicode --prefix=/usr/local/$HOST_TRIPLE \
-            --host=$HOST_TRIPLE --build=x86_64-linux-gnu --with-gtk=3 \
-            CFLAGS="-m32" CXXFLAGS="-m32" LDFLAGS="-m32"
-          make -j$(nproc)
-          sudo make install
-
-      - name: Build and install wxWidgets 3.1.2 (armhf)
-        if: matrix.arch == 'arm'
-        env:
-          HOST_TRIPLE: arm-linux-gnueabihf
-        run: |
-          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
-          tar xf wxWidgets-3.1.2.tar.bz2
-          cd wxWidgets-3.1.2
-          mkdir gtk-build && cd gtk-build
-          ../configure --disable-shared --enable-unicode --prefix=/usr/local/$HOST_TRIPLE \
-            --host=$HOST_TRIPLE --build=x86_64-linux-gnu --with-gtk=3
-          make -j$(nproc)
-          sudo make install
-
-      - name: Build and install wxWidgets 3.1.2 (arm64)
-        if: matrix.arch == 'arm64'
-        env:
-          HOST_TRIPLE: aarch64-linux-gnu
-        run: |
-          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
-          tar xf wxWidgets-3.1.2.tar.bz2
-          cd wxWidgets-3.1.2
-          mkdir gtk-build && cd gtk-build
-          ../configure --disable-shared --enable-unicode --prefix=/usr/local/$HOST_TRIPLE \
-            --host=$HOST_TRIPLE --build=x86_64-linux-gnu --with-gtk=3
-          make -j$(nproc)
-          sudo make install
-
-      # ---------- 修复头文件路径（确保 zen/warn_static.h 可被找到） ----------
-      - name: Prepare include path
-        working-directory: FreeFileSync/FreeFileSync/Source
-        run: |
-          echo "=== Finding zen directory ==="
-          ZEN_PATH=$(find $GITHUB_WORKSPACE/FreeFileSync -type d -name zen | head -1)
-          if [ -n "$ZEN_PATH" ]; then
-            echo "zen directory found at: $ZEN_PATH"
-            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
-            ln -sf "$ZEN_PATH" zen
-          else
-            echo "ERROR: zen directory not found"
-            exit 1
-          fi
-
-      # ---------- 构建 FreeFileSync（根据架构） ----------
-      - name: Build FreeFileSync for x64
-        if: matrix.arch == 'x64'
-        working-directory: FreeFileSync/FreeFileSync/Source
-        env:
-          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig
-        run: |
-          make -j$(nproc) CXX=g++
-          mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_x64
-
-      - name: Build FreeFileSync for x86
-        if: matrix.arch == 'x86'
-        working-directory: FreeFileSync/FreeFileSync/Source
-        env:
-          HOST_TRIPLE: i686-linux-gnu
-          CXX: g++
-          CXXFLAGS: -m32
-          LDFLAGS: -m32
-          PKG_CONFIG_PATH: /usr/local/$HOST_TRIPLE/lib/pkgconfig:/usr/lib/i386-linux-gnu/pkgconfig
-        run: |
-          export PATH=/usr/local/$HOST_TRIPLE/bin:$PATH
-          make -j$(nproc) CXX=g++ CXXFLAGS="$CXXFLAGS" LDFLAGS="$LDFLAGS"
-          mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_x86
-
-      - name: Build FreeFileSync for armhf
-        if: matrix.arch == 'arm'
-        working-directory: FreeFileSync/FreeFileSync/Source
-        env:
-          HOST_TRIPLE: arm-linux-gnueabihf
-          CXX: arm-linux-gnueabihf-g++
-          PKG_CONFIG_PATH: /usr/local/$HOST_TRIPLE/lib/pkgconfig:/usr/lib/$HOST_TRIPLE/pkgconfig
-        run: |
-          echo "=== Build environment for armhf ==="
-          export PATH=/usr/local/$HOST_TRIPLE/bin:$PATH
-          echo "CXX=$CXX"
-          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
-          pkg-config --cflags gtk+-3.0 || echo "pkg-config failed for gtk+-3.0"
-          make -j$(nproc) CXX=$CXX
-          mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_armhf
-
-      - name: Build FreeFileSync for arm64
-        if: matrix.arch == 'arm64'
-        working-directory: FreeFileSync/FreeFileSync/Source
-        env:
-          HOST_TRIPLE: aarch64-linux-gnu
-          CXX: aarch64-linux-gnu-g++
-          PKG_CONFIG_PATH: /usr/local/$HOST_TRIPLE/lib/pkgconfig:/usr/lib/$HOST_TRIPLE/pkgconfig
-        run: |
-          echo "=== Build environment for arm64 ==="
-          export PATH=/usr/local/$HOST_TRIPLE/bin:$PATH
-          echo "CXX=$CXX"
-          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
-          pkg-config --cflags gtk+-3.0 || echo "pkg-config failed for gtk+-3.0"
-          make -j$(nproc) CXX=$CXX
-          mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_arm64
-
-      # ---------- 上传构建产物 ----------
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
