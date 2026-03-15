@@ -1,15 +1,15 @@
-name: Build FreeFileSync
+name: Build FreeFileSync (Windows only)
 
 on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: 'Target platforms (comma separated: linux, windows)'
+        description: 'Target platforms (only windows supported)'
         required: true
-        default: 'linux,windows'
+        default: 'windows'
         type: string
       architectures:
-        description: 'Target architectures (comma separated: x64)'
+        description: 'Target architectures (only x64 supported)'
         required: true
         default: 'x64'
         type: string
@@ -23,9 +23,8 @@ jobs:
       - name: Generate build matrix
         id: generate
         run: |
-          # 定义每个平台支持的架构（目前仅 x64，可扩展）
+          # 仅支持 Windows x64
           declare -A SUPPORTED=(
-            [linux]="x64"
             [windows]="x64"
           )
 
@@ -36,7 +35,7 @@ jobs:
           for platform in "${PLATFORMS[@]}"; do
             platform=$(echo "$platform" | xargs)
             if [[ -z "${SUPPORTED[$platform]}" ]]; then
-              echo "Unsupported platform: $platform"
+              echo "Unsupported platform: $platform (only windows is allowed)"
               exit 1
             fi
             for arch in "${ARCHS[@]}"; do
@@ -59,7 +58,7 @@ jobs:
 
   build:
     needs: setup
-    runs-on: ${{ matrix.platform == 'windows' && 'windows-latest' || 'ubuntu-22.04' }}
+    runs-on: windows-latest
     strategy:
       matrix:
         include: ${{ fromJson(needs.setup.outputs.matrix) }}
@@ -73,39 +72,8 @@ jobs:
           ref: master
           path: FreeFileSync
 
-      # ---------- Linux 依赖安装 ----------
-      - name: Install Linux base dependencies
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            g++ make \
-            libboost-all-dev \
-            libcurl4-openssl-dev \
-            libssh2-1-dev \
-            libidn2-dev \
-            libgtk-3-dev \
-            pkg-config \
-            autoconf automake libtool \
-            gettext \
-            wget
-
-      # 手动编译 wxWidgets 3.1.2（Linux）
-      - name: Build and install wxWidgets 3.1.2 (Linux)
-        if: matrix.platform == 'linux'
-        run: |
-          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
-          tar xf wxWidgets-3.1.2.tar.bz2
-          cd wxWidgets-3.1.2
-          mkdir gtk-build && cd gtk-build
-          ../configure --disable-shared --enable-unicode --prefix=/usr/local
-          make -j$(nproc)
-          sudo make install
-          sudo ldconfig
-
       # ---------- Windows 依赖安装 (MSYS2) ----------
       - name: Install Windows base dependencies (MSYS2)
-        if: matrix.platform == 'windows'
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
@@ -124,9 +92,8 @@ jobs:
             tar
             patch
 
-      # Windows 下手动编译 wxWidgets 3.1.2（带 --disable-dependency-tracking）
+      # 手动编译 wxWidgets 3.1.2（Windows）
       - name: Build and install wxWidgets 3.1.2 (Windows)
-        if: matrix.platform == 'windows'
         shell: msys2 {0}
         run: |
           cd $HOME
@@ -142,37 +109,7 @@ jobs:
           make install
 
       # ---------- 修复头文件路径（智能查找 zen 目录）----------
-      - name: Prepare include path (Linux)
-        if: matrix.platform == 'linux'
-        working-directory: FreeFileSync/FreeFileSync/Source
-        run: |
-          echo "=== Locating zen directory ==="
-          # 从当前目录开始向上查找包含 zen 的目录
-          ZEN_PATH=""
-          DIR=$(pwd)
-          while [ "$DIR" != "/" ]; do
-            if [ -d "$DIR/zen" ]; then
-              ZEN_PATH="$DIR/zen"
-              break
-            fi
-            DIR=$(dirname "$DIR")
-          done
-          if [ -z "$ZEN_PATH" ]; then
-            echo "ERROR: zen directory not found!"
-            exit 1
-          fi
-          echo "zen directory found at: $ZEN_PATH"
-          # 将 -I$ZEN_PATH 添加到 CXXFLAGS
-          if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
-            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
-          else
-            echo "CXXFLAGS += -I$ZEN_PATH" >> Makefile
-          fi
-          # 创建符号链接，以备其他情况
-          ln -sf "$ZEN_PATH" zen
-
       - name: Prepare include path (Windows)
-        if: matrix.platform == 'windows'
         shell: msys2 {0}
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
@@ -191,39 +128,44 @@ jobs:
             exit 1
           fi
           echo "zen directory found at: $ZEN_PATH"
+
+          # 1. 将 -I 写入 Makefile（兼容原有逻辑）
           if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
             sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
           else
             echo "CXXFLAGS += -I$ZEN_PATH" >> Makefile
           fi
-          ln -sf "$ZEN_PATH" zen
 
-      # ---------- Linux 构建 (x64) ----------
-      - name: Build FreeFileSync for Linux (x64)
-        if: matrix.platform == 'linux' && matrix.arch == 'x64'
-        working-directory: FreeFileSync/FreeFileSync/Source
-        env:
-          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig
-        run: |
-          export PATH=/usr/local/bin:$PATH
-          # 确保编译器为 g++
-          sed -i 's/\bg++\b/g++/g' Makefile
-          make -j$(nproc)
-          mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_x64
+          # 2. 设置环境变量，确保编译器总能找到（即使 Makefile 覆盖）
+          echo "CXXFLAGS=\"-I$ZEN_PATH \$CXXFLAGS\"" >> $GITHUB_ENV
+          echo "CPPFLAGS=\"-I$ZEN_PATH \$CPPFLAGS\"" >> $GITHUB_ENV
+
+          # 3. 在临时构建目录创建符号链接（避免构建过程切换目录后找不到）
+          #   根据错误信息，临时目录为 /tmp/FreeFileSync_x86_64_Make/ffs/src/
+          TMP_BUILD_DIR="/tmp/FreeFileSync_x86_64_Make/ffs/src"
+          mkdir -p "$TMP_BUILD_DIR"
+          ln -sf "$ZEN_PATH" "$TMP_BUILD_DIR/zen"
+          echo "Created symlink in $TMP_BUILD_DIR/zen"
 
       # ---------- Windows 构建 (x64) ----------
       - name: Build FreeFileSync for Windows (x64)
-        if: matrix.platform == 'windows' && matrix.arch == 'x64'
         shell: msys2 {0}
         working-directory: FreeFileSync/FreeFileSync/Source
         env:
           MSYSTEM: MINGW64
-          PKG_CONFIG_PATH: /mingw64/lib/pkgconfig
+          # 强制 pkg-config 只使用 Mingw64 的库路径，避免错误引用 /usr/include
+          PKG_CONFIG_LIBDIR: /mingw64/lib/pkgconfig
         run: |
           export PATH=/mingw64/bin:$PATH
-          sed -i 's/\bg++\b/g++/g' Makefile
+          # 确保编译器为 g++（Makefile 中可能写死 g++，无需修改）
+          # 可选：检查 pkg-config 是否正确
+          echo "Checking gtk+-3.0 cflags:"
+          pkg-config --cflags gtk+-3.0
+
+          # 执行构建
           make -j$(nproc)
+
+          # 复制产物
           mkdir -p $GITHUB_WORKSPACE/artifacts/
           cp ../Build/Bin/FreeFileSync.exe $GITHUB_WORKSPACE/artifacts/FreeFileSync_windows_x64.exe
 
