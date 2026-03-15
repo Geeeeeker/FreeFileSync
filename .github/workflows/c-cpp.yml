@@ -4,18 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: 'Target platforms (comma separated: linux, windows, macos)'
+        description: 'Target platforms (comma separated: linux, windows)'
         required: true
-        default: 'linux,windows,macos'
+        default: 'linux,windows'
         type: string
       architectures:
-        description: 'Target architectures (comma separated: x86, x64, arm, arm64)'
+        description: 'Target architectures (comma separated: x64)'
         required: true
-        default: 'x64,arm64'
+        default: 'x64'
         type: string
 
 jobs:
-  # 生成构建矩阵（平台+架构有效组合）
   setup:
     runs-on: ubuntu-latest
     outputs:
@@ -24,11 +23,10 @@ jobs:
       - name: Generate build matrix
         id: generate
         run: |
-          # 定义每个平台支持的架构
+          # 支持的平台与架构（仅 x64 为例，如需其他架构请自行扩展）
           declare -A SUPPORTED=(
-            [linux]="x86 x64 arm arm64"
-            [windows]="x86 x64 arm arm64"
-            [macos]="x64 arm64"
+            [linux]="x64"
+            [windows]="x64"
           )
 
           IFS=',' read -r -a PLATFORMS <<< "${{ inputs.platforms }}"
@@ -56,14 +54,12 @@ jobs:
             exit 1
           fi
 
-          # 输出紧凑 JSON 数组（修复格式错误）
           matrix_json=$(printf '%s\n' "${MATRIX_ENTRIES[@]}" | jq -c -s '.')
           echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
 
-  # 并行构建每个组合
   build:
     needs: setup
-    runs-on: ${{ matrix.platform == 'windows' && 'windows-latest' || matrix.platform == 'macos' && 'macos-latest' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.platform == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
     strategy:
       matrix:
         include: ${{ fromJson(needs.setup.outputs.matrix) }}
@@ -77,127 +73,77 @@ jobs:
           ref: master
           path: FreeFileSync
 
-      # ---------- 安装依赖 ----------
-      - name: Install Linux dependencies
-        if: matrix.platform == 'linux'
+      # ---------- Linux 依赖安装 ----------
+      - name: Install Linux dependencies (x64)
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
         run: |
           sudo apt update
-          sudo apt install -y g++ make libboost-all-dev
-          # 交叉编译工具链
-          if [[ "${{ matrix.arch }}" == "arm" ]]; then
-            sudo apt install -y g++-arm-linux-gnueabihf
-          fi
-          if [[ "${{ matrix.arch }}" == "arm64" ]]; then
-            sudo apt install -y g++-aarch64-linux-gnu
-          fi
-          if [[ "${{ matrix.arch }}" == "x86" ]]; then
-            sudo apt install -y g++-multilib
-          fi
+          sudo apt install -y \
+            g++ make \
+            libboost-all-dev \
+            libwxgtk3.0-gtk3-dev \
+            libcurl4-openssl-dev \
+            libidn2-dev \
+            libssh2-1-dev \
+            libgtk-3-dev \
+            pkg-config
 
-      - name: Install Windows dependencies (MSYS2)
-        if: matrix.platform == 'windows'
+      # ---------- Windows 依赖安装 ----------
+      - name: Install Windows dependencies (x64)
+        if: matrix.platform == 'windows' && matrix.arch == 'x64'
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64   # 默认，后续会根据架构覆盖
+          msystem: MINGW64
           update: true
           install: >-
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-make
             mingw-w64-x86_64-boost
             mingw-w64-x86_64-wxWidgets
-            # 对于 arm64 还需要 clang（下面步骤中单独安装）
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-libssh2
+            mingw-w64-x86_64-gtk3
+            mingw-w64-x86_64-pkg-config
 
-      - name: Install macOS dependencies
-        if: matrix.platform == 'macos'
+      # ---------- 修复头文件路径（创建符号链接 zen -> ../zen）----------
+      - name: Fix include path for Linux
+        if: matrix.platform == 'linux'
+        working-directory: FreeFileSync/FreeFileSync/Source
         run: |
-          brew update
-          brew install boost wxwidgets
+          ln -s ../zen zen || true
 
-      # ---------- Windows 构建（按架构分别处理）----------
+      - name: Fix include path for Windows
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          ln -s ../zen zen || true
+
+      # ---------- Linux 构建 ----------
+      - name: Build FreeFileSync for Linux (x64)
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          # 确保 pkg-config 能找到所有 .pc 文件
+          export PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig
+          # 修改 Makefile 中编译器为 g++（默认）
+          sed -i 's/\bg++\b/g++/g' Makefile
+          make -j$(nproc)
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_x64
+
+      # ---------- Windows 构建 ----------
       - name: Build FreeFileSync for Windows (x64)
         if: matrix.platform == 'windows' && matrix.arch == 'x64'
         shell: msys2 {0}
+        working-directory: FreeFileSync/FreeFileSync/Source
         run: |
-          export MSYSTEM=MINGW64
-          cd FreeFileSync/FreeFileSync/Source
+          export PATH=/mingw64/bin:$PATH
+          # 修改 Makefile 中编译器为 g++
           sed -i 's/\bg++\b/g++/g' Makefile
           make -j$(nproc)
           mkdir -p $GITHUB_WORKSPACE/artifacts/
           cp ../Build/Bin/FreeFileSync.exe $GITHUB_WORKSPACE/artifacts/FreeFileSync_windows_x64.exe
-
-      - name: Build FreeFileSync for Windows (x86)
-        if: matrix.platform == 'windows' && matrix.arch == 'x86'
-        shell: msys2 {0}
-        run: |
-          export MSYSTEM=MINGW32
-          cd FreeFileSync/FreeFileSync/Source
-          sed -i 's/\bg++\b/g++/g' Makefile
-          make -j$(nproc)
-          mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync.exe $GITHUB_WORKSPACE/artifacts/FreeFileSync_windows_x86.exe
-
-      - name: Build FreeFileSync for Windows (arm64)
-        if: matrix.platform == 'windows' && matrix.arch == 'arm64'
-        shell: msys2 {0}
-        run: |
-          # 安装 arm64 工具链（若未预装）
-          pacman -S --noconfirm mingw-w64-clang-aarch64-clang
-          export MSYSTEM=CLANGARM64
-          cd FreeFileSync/FreeFileSync/Source
-          sed -i 's/\bg++\b/clang++/g' Makefile
-          make -j$(nproc)
-          mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync.exe $GITHUB_WORKSPACE/artifacts/FreeFileSync_windows_arm64.exe
-
-      # Windows 的 arm（32位）架构类似处理，但需确认工具链可用
-
-      # ---------- Linux 构建 ----------
-      - name: Build FreeFileSync for Linux
-        if: matrix.platform == 'linux'
-        working-directory: FreeFileSync/FreeFileSync/Source
-        run: |
-          case "${{ matrix.arch }}" in
-            x86)
-              export CXX="g++ -m32"
-              export AR=gcc-ar
-              ;;
-            x64)
-              export CXX="g++ -m64"
-              export AR=gcc-ar
-              ;;
-            arm)
-              export CXX=arm-linux-gnueabihf-g++
-              export AR=arm-linux-gnueabihf-ar
-              ;;
-            arm64)
-              export CXX=aarch64-linux-gnu-g++
-              export AR=aarch64-linux-gnu-ar
-              ;;
-          esac
-          sed -i "s/\bg++\b/${CXX}/g" Makefile
-          make -j$(nproc)
-          mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_${{ matrix.arch }}
-
-      # ---------- macOS 构建 ----------
-      - name: Build FreeFileSync for macOS
-        if: matrix.platform == 'macos'
-        working-directory: FreeFileSync/FreeFileSync/Source
-        run: |
-          case "${{ matrix.arch }}" in
-            x64)
-              export ARCH_FLAGS="-arch x86_64"
-              ;;
-            arm64)
-              export ARCH_FLAGS="-arch arm64"
-              ;;
-          esac
-          export CXX=clang++
-          export CXXFLAGS="$ARCH_FLAGS"
-          sed -i "s/\bg++\b/${CXX}/g" Makefile
-          make -j$(sysctl -n hw.logicalcpu)
-          mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
 
       # ---------- 上传构建产物 ----------
       - name: Upload artifacts
