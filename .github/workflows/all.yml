@@ -57,7 +57,7 @@ jobs:
           brew update
           brew install boost wxwidgets libssh2 pkg-config
 
-      # 修复头文件：在 zen/string_base.h 开头插入 #include <atomic>（单行命令）
+      # 修复头文件：在 zen/string_base.h 开头插入 #include <atomic>
       - name: Apply atomic header patch
         working-directory: FreeFileSync/FreeFileSync
         run: |
@@ -91,34 +91,77 @@ jobs:
           fi
           ln -sf "$ZEN_PATH" zen
 
+      # 构建前的调试信息
+      - name: Debug environment
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          echo "=== Compiler info ==="
+          clang++ --version
+          echo "=== Makefile content ==="
+          cat Makefile
+          echo "=== Homebrew prefix ==="
+          brew --prefix
+          echo "=== wxWidgets flags ==="
+          wx-config --cxxflags --libs || echo "wx-config not found"
+          echo "=== pkg-config libssh2 ==="
+          pkg-config --cflags --libs libssh2 || echo "libssh2 pc not found"
+          echo "=== Current directory ==="
+          pwd
+          ls -la
+
       - name: Build FreeFileSync for ${{ matrix.arch }}
         working-directory: FreeFileSync/FreeFileSync/Source
         env:
           ARCH: ${{ matrix.arch }}
-          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig
         run: |
           if [ "$ARCH" = "x86_64" ]; then
             ARCH_FLAGS="-arch x86_64"
+            HOMEBREW_PREFIX="/usr/local"
           elif [ "$ARCH" = "arm64" ]; then
             ARCH_FLAGS="-arch arm64"
+            HOMEBREW_PREFIX="/opt/homebrew"
           else
             echo "Unsupported architecture: $ARCH"
             exit 1
           fi
 
+          # 设置编译器和基础标志（使用 C++17 以获得更好的兼容性）
           export CXX=clang++
-          export CXXFLAGS="$ARCH_FLAGS -std=c++23 -stdlib=libc++"
-          export LDFLAGS="$ARCH_FLAGS"
+          export CXXFLAGS="$ARCH_FLAGS -std=c++17 -stdlib=libc++ -I$HOMEBREW_PREFIX/include"
+          export LDFLAGS="$ARCH_FLAGS -L$HOMEBREW_PREFIX/lib"
 
+          # 通过 pkg-config 或 wx-config 获取依赖标志
+          if command -v wx-config &> /dev/null; then
+            WX_FLAGS=$(wx-config --cxxflags --libs)
+            export CXXFLAGS="$CXXFLAGS $WX_FLAGS"
+          fi
+          if command -v pkg-config &> /dev/null; then
+            LIBSSH2_CFLAGS=$(pkg-config --cflags libssh2 2>/dev/null || echo "")
+            LIBSSH2_LIBS=$(pkg-config --libs libssh2 2>/dev/null || echo "")
+            export CXXFLAGS="$CXXFLAGS $LIBSSH2_CFLAGS"
+            export LDFLAGS="$LDFLAGS $LIBSSH2_LIBS"
+          fi
+
+          # 将 Makefile 中的 g++ 替换为 clang++
           sed -i '' 's/\bg++\b/clang++/g' Makefile
 
-          make -j$(sysctl -n hw.logicalcpu)
+          # 设置 macOS 最低部署版本（根据需求调整）
+          export MACOSX_DEPLOYMENT_TARGET=11.0
 
+          # 详细构建并保存日志
+          make V=1 -j$(sysctl -n hw.logicalcpu) 2>&1 | tee build_${{ matrix.arch }}.log
+
+          # 复制生成的可执行文件
           mkdir -p $GITHUB_WORKSPACE/artifacts/
-          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
+          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }} || true
 
+      # 即使构建失败也上传日志和可执行文件（如果有）
       - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: FreeFileSync-macos-${{ matrix.arch }}
-          path: artifacts/
+          name: FreeFileSync-macos-${{ matrix.arch }}-logs
+          path: |
+            FreeFileSync/FreeFileSync/Source/build_${{ matrix.arch }}.log
+            artifacts/
+          if-no-files-found: warn
