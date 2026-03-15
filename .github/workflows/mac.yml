@@ -3,42 +3,69 @@ name: Build FreeFileSync (macOS)
 on:
   workflow_dispatch:
     inputs:
+      platforms:
+        description: 'Target platforms (only macos supported)'
+        required: true
+        default: 'macos'
+        type: string
       architectures:
-        description: 'Target architectures (comma separated: x86_64, arm64)'
+        description: 'Target architectures (comma separated: x86_64, arm64) [x64 will be mapped to x86_64]'
         required: true
         default: 'x86_64,arm64'
         type: string
 
 jobs:
   setup:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.generate.outputs.matrix }}
     steps:
       - name: Generate build matrix
         id: generate
         run: |
-          SUPPORTED="x86_64 arm64"
+          # 定义支持的平台及架构（macOS 只支持 x86_64 和 arm64）
+          declare -A SUPPORTED=(
+            [macos]="x86_64 arm64"
+          )
+
+          IFS=',' read -r -a PLATFORMS <<< "${{ inputs.platforms }}"
           IFS=',' read -r -a ARCHS <<< "${{ inputs.architectures }}"
+
           MATRIX_ENTRIES=()
-          for arch in "${ARCHS[@]}"; do
-            arch=$(echo "$arch" | xargs)
-            if [[ " $SUPPORTED " =~ " $arch " ]]; then
-              MATRIX_ENTRIES+=("{\"arch\":\"$arch\"}")
-            else
-              echo "Warning: $arch is not supported, skipping"
+          for platform in "${PLATFORMS[@]}"; do
+            platform=$(echo "$platform" | xargs)
+            if [[ -z "${SUPPORTED[$platform]}" ]]; then
+              echo "Unsupported platform: $platform"
+              exit 1
             fi
+            for arch in "${ARCHS[@]}"; do
+              arch=$(echo "$arch" | xargs)
+              # 映射常用别名
+              case $arch in
+                x64) arch="x86_64" ;;
+                arm64) arch="arm64" ;;
+                x86) echo "Warning: x86 (32-bit) is not supported on macOS, skipping" ; continue ;;
+                arm) echo "Warning: arm (32-bit) is not supported on macOS, skipping" ; continue ;;
+              esac
+              if [[ " ${SUPPORTED[$platform]} " =~ " $arch " ]]; then
+                MATRIX_ENTRIES+=("{\"platform\":\"$platform\",\"arch\":\"$arch\"}")
+              else
+                echo "Warning: $arch is not supported on $platform, skipping"
+              fi
+            done
           done
+
           if [ ${#MATRIX_ENTRIES[@]} -eq 0 ]; then
-            echo "No valid architectures selected."
+            echo "No valid (platform, arch) pairs selected."
             exit 1
           fi
+
           matrix_json=$(printf '%s\n' "${MATRIX_ENTRIES[@]}" | jq -c -s '.')
           echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
 
   build:
     needs: setup
-    runs-on: macos-latest
+    runs-on: ${{ fromJson('{"x86_64":"macos-13","arm64":"macos-14"}')[matrix.arch] }}
     strategy:
       matrix:
         include: ${{ fromJson(needs.setup.outputs.matrix) }}
@@ -52,188 +79,72 @@ jobs:
           ref: master
           path: FreeFileSync
 
+      # ========== 安装基础工具和依赖 ==========
       - name: Install dependencies via Homebrew
         run: |
           brew update
-          brew install boost wxwidgets libssh2 pkg-config
+          # 编译工具
+          brew install autoconf automake libtool pkg-config wget
+          # 必需库
+          brew install boost openssl libssh2 libidn2 curl
 
-      - name: Find zen directory
-        id: find-zen
-        working-directory: FreeFileSync/FreeFileSync/Source
+      # ========== 编译 wxWidgets（静态库） ==========
+      - name: Build wxWidgets (static)
         run: |
-          echo "=== Locating zen directory ==="
-          ZEN_PATH=""
-          DIR=$(pwd)
-          while [ "$DIR" != "/" ]; do
-            if [ -d "$DIR/zen" ]; then
-              ZEN_PATH="$DIR/zen"
-              break
-            fi
-            DIR=$(dirname "$DIR")
-          done
-          if [ -z "$ZEN_PATH" ]; then
-            echo "ERROR: zen directory not found!"
-            exit 1
-          fi
-          echo "zen directory found at: $ZEN_PATH"
-          echo "zen_path=$ZEN_PATH" >> $GITHUB_OUTPUT
+          # 下载 wxWidgets 3.1.2
+          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
+          tar xf wxWidgets-3.1.2.tar.bz2
+          cd wxWidgets-3.1.2
 
-      - name: Apply atomic header patch (to original source)
+          # 配置（macOS 使用 cocoa 后端，静态链接，安装到用户目录避免权限问题）
+          mkdir build-cocoa && cd build-cocoa
+          ../configure \
+            --disable-shared \
+            --enable-unicode \
+            --prefix=$HOME/wx-install \
+            --with-osx-cocoa \
+            CXXFLAGS="-stdlib=libc++" \
+            LDFLAGS="-stdlib=libc++" \
+            MACOSX_DEPLOYMENT_TARGET=10.15
+
+          make -j$(sysctl -n hw.logicalcpu)
+          make install
+          cd ../..
+
+      # ========== 修复 zen 头文件路径 ==========
+      - name: Fix zen header path
         run: |
-          ZEN_PATH="${{ steps.find-zen.outputs.zen_path }}"
-          echo "Patching $ZEN_PATH/string_base.h"
-          if [ -f "$ZEN_PATH/string_base.h" ]; then
-            if ! grep -q '#include <atomic>' "$ZEN_PATH/string_base.h"; then
-              echo '#include <atomic>' | cat - "$ZEN_PATH/string_base.h" > temp && mv temp "$ZEN_PATH/string_base.h"
-              echo "Patch applied."
-            else
-              echo "File already contains #include <atomic>"
-            fi
+          cd FreeFileSync/FreeFileSync/Source
+          ZEN_PATH=$(find $GITHUB_WORKSPACE/FreeFileSync -type d -name zen | head -1)
+          if [ -n "$ZEN_PATH" ]; then
+            echo "zen directory found at: $ZEN_PATH"
+            # 使用兼容的 sed 命令（备份后删除）
+            sed -i.bak "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
+            rm -f Makefile.bak
+            ln -sf "$ZEN_PATH" zen
           else
-            echo "string_base.h NOT found at $ZEN_PATH!"
-            exit 1
-          fi
-
-      - name: Verify atomic header patch
-        run: |
-          ZEN_PATH="${{ steps.find-zen.outputs.zen_path }}"
-          echo "=== First 5 lines of $ZEN_PATH/string_base.h ==="
-          head -5 "$ZEN_PATH/string_base.h"
-          if grep -q '#include <atomic>' "$ZEN_PATH/string_base.h"; then
-            echo "✅ atomic header included"
-          else
-            echo "❌ atomic header NOT included"
-            echo '#include <atomic>' | cat - "$ZEN_PATH/string_base.h" > temp && mv temp "$ZEN_PATH/string_base.h"
-            echo "Retry: inserted again"
-            head -5 "$ZEN_PATH/string_base.h"
-          fi
-
-      - name: Add zen include path and symlink (in original source)
-        working-directory: FreeFileSync/FreeFileSync/Source
-        run: |
-          ZEN_PATH="${{ steps.find-zen.outputs.zen_path }}"
-          if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
-            sed -i '' "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
-          else
-            echo "CXXFLAGS += -I$ZEN_PATH" >> Makefile
-          fi
-          ln -sf "$ZEN_PATH" zen
-
-      - name: Debug environment
-        working-directory: FreeFileSync/FreeFileSync/Source
-        run: |
-          echo "=== Compiler info ==="
-          clang++ --version
-          echo "=== Makefile content ==="
-          cat Makefile
-          echo "=== Homebrew prefix ==="
-          brew --prefix
-          echo "=== wxWidgets flags ==="
-          wx-config --cxxflags --libs || echo "wx-config not found"
-          echo "=== pkg-config libssh2 ==="
-          pkg-config --cflags --libs libssh2 || echo "libssh2 pc not found"
-          echo "=== Current directory ==="
-          pwd
-          ls -la
-
-      - name: Build FreeFileSync for ${{ matrix.arch }}
-        working-directory: FreeFileSync/FreeFileSync
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          if [ "$ARCH" = "x86_64" ]; then
-            ARCH_FLAGS="-arch x86_64"
-            HOMEBREW_PREFIX="/usr/local"
-          elif [ "$ARCH" = "arm64" ]; then
-            ARCH_FLAGS="-arch arm64"
-            HOMEBREW_PREFIX="/opt/homebrew"
-          else
-            echo "Unsupported architecture: $ARCH"
+            echo "ERROR: zen directory not found"
             exit 1
           fi
 
-          export CXX=clang++
-          export CXXFLAGS="$ARCH_FLAGS -std=c++17 -stdlib=libc++ -I$HOMEBREW_PREFIX/include"
-          export LDFLAGS="$ARCH_FLAGS -L$HOMEBREW_PREFIX/lib"
-          export MACOSX_DEPLOYMENT_TARGET=11.0
+      # ========== 构建 FreeFileSync ==========
+      - name: Build FreeFileSync binary
+        run: |
+          cd FreeFileSync/FreeFileSync/Source
 
-          # 创建构建目录并复制整个源码树
-          BUILD_DIR="$GITHUB_WORKSPACE/build_$ARCH"
-          echo "Creating build directory: $BUILD_DIR"
-          mkdir -p "$BUILD_DIR"
-          echo "Copying source files to build directory..."
-          cp -r . "$BUILD_DIR"
+          # 设置 pkg-config 路径：包含 wxWidgets 和 Homebrew 库
+          export PKG_CONFIG_PATH="$HOME/wx-install/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig"
 
-          # 调试：列出构建目录内容
-          echo "=== Contents of $BUILD_DIR ==="
-          ls -la "$BUILD_DIR"
-          
-          cd "$BUILD_DIR/Source"
-          
-          # 调试：列出 Source 目录内容，确认 zen 软链接
-          echo "=== Contents of Source directory ==="
-          ls -la
+          # 使用 clang 编译（macOS 默认编译器）
+          make -j$(sysctl -n hw.logicalcpu) CXX=clang++
 
-          # 通过 readlink 获取 zen 软链接的真实路径，并确保补丁应用到该位置
-          echo "=== Ensuring atomic patch in build directory ==="
-          if [ -L zen ]; then
-              REAL_ZEN=$(readlink zen)
-              echo "zen symlink points to $REAL_ZEN"
-              if [ -f "$REAL_ZEN/string_base.h" ]; then
-                  if ! grep -q '#include <atomic>' "$REAL_ZEN/string_base.h"; then
-                      echo '#include <atomic>' | cat - "$REAL_ZEN/string_base.h" > temp && mv temp "$REAL_ZEN/string_base.h"
-                      echo "Reapplied atomic patch to $REAL_ZEN/string_base.h"
-                  else
-                      echo "atomic header already patched in $REAL_ZEN/string_base.h"
-                  fi
-              else
-                  echo "ERROR: $REAL_ZEN/string_base.h not found!"
-                  exit 1
-              fi
-          else
-              echo "ERROR: zen is not a symlink in build directory!"
-              exit 1
-          fi
-
-          # 将 Makefile 中的 g++ 替换为 clang++
-          sed -i '' 's/\bg++\b/clang++/g' Makefile
-
-          # 强制将临时目录变量 tmpPath 设置为当前目录下的固定路径
-          echo "=== Patching Makefile to use fixed build directory ==="
-          sed -i '' 's|^tmpPath =.*|tmpPath = ./build_temp|' Makefile
-          mkdir -p ./build_temp
-
-          # 替换所有绝对路径的 -I 指向原始 zen 目录为相对路径 -I./zen
-          echo "=== Replacing absolute zen include paths with relative ==="
-          sed -i '' 's|-I/Users/runner/work/FreeFileSync/FreeFileSync/FreeFileSync/zen|-I./zen|g' Makefile
-
-          # 可选：移除可能引起问题的 gtk+ 相关标志（macOS 不需要）
-          sed -i '' '/pkg-config --cflags gtk+-3.0/d' Makefile
-
-          # 显示修改后的 Makefile 关键部分
-          echo "=== Makefile after patching (tmpPath and include paths) ==="
-          grep -E '^(tmpPath|CXXFLAGS.*-I\./zen)' Makefile || echo "Pattern not found"
-
-          # 构建
-          echo "=== Starting build ==="
-          make V=1 -j$(sysctl -n hw.logicalcpu) 2>&1 | tee build.log
-
-          # 复制结果
+          # 复制产物
           mkdir -p $GITHUB_WORKSPACE/artifacts/
-          if [ -f ../Build/Bin/FreeFileSync ]; then
-            cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
-            echo "Binary copied."
-          else
-            echo "Binary not found!"
-            find .. -name "FreeFileSync" -type f 2>/dev/null || true
-          fi
+          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
 
-          cp build.log $GITHUB_WORKSPACE/artifacts/build_${{ matrix.arch }}.log
-
+      # ========== 上传构建产物 ==========
       - name: Upload artifacts
-        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: FreeFileSync-macos-${{ matrix.arch }}-logs
+          name: FreeFileSync-macos-${{ matrix.arch }}
           path: artifacts/
-          if-no-files-found: warn
