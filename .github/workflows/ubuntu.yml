@@ -77,9 +77,10 @@ jobs:
             pkg-config \
             autoconf automake libtool \
             gettext \
-            wget
+            wget \
+            git
 
-      # 编译 wxWidgets 3.2.6（支持 DPI）
+      # 编译 wxWidgets 3.2.6（去掉 --enable-dpi-independent）
       - name: Build and install wxWidgets 3.2.6 (Linux)
         if: matrix.platform == 'linux'
         run: |
@@ -87,7 +88,7 @@ jobs:
           tar xf wxWidgets-3.2.6.tar.bz2
           cd wxWidgets-3.2.6
           mkdir gtk-build && cd gtk-build
-          ../configure --disable-shared --enable-unicode --with-gtk=3 --enable-dpi-independent --prefix=/usr/local
+          ../configure --disable-shared --enable-unicode --with-gtk=3 --prefix=/usr/local
           make -j$(nproc)
           sudo make install
           sudo ldconfig
@@ -125,7 +126,7 @@ jobs:
           cd wxWidgets-3.2.6
           mkdir -p build-msw
           cd build-msw
-          ../configure --disable-shared --enable-unicode --with-msw --enable-dpi-independent --prefix=/mingw64
+          ../configure --disable-shared --enable-unicode --with-msw --prefix=/mingw64
           make -j$(nproc)
           make install
 
