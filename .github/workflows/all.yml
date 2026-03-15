@@ -28,7 +28,7 @@ jobs:
               MATRIX_ENTRIES+=("{\"arch\":\"$arch\"}")
             else
               echo "Warning: $arch is not supported, skipping"
-              fi
+            fi
           done
           if [ ${#MATRIX_ENTRIES[@]} -eq 0 ]; then
             echo "No valid architectures selected."
