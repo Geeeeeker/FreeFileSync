@@ -142,6 +142,7 @@ jobs:
           make install
 
       # ---------- 修复头文件路径（确保 zen/warn_static.h 可被找到）----------
+      # 注意：需要添加的是 zen 的父目录，而不是 zen 本身，因为源码中是 #include "zen/xxx.h"
       - name: Prepare include path (Linux)
         if: matrix.platform == 'linux'
         working-directory: FreeFileSync/FreeFileSync/Source
@@ -151,13 +152,16 @@ jobs:
           ZEN_PATH=$(cd ../.. && pwd)/zen
           if [ -d "$ZEN_PATH" ]; then
             echo "zen directory found at: $ZEN_PATH"
-            # 将 -I$ZEN_PATH 添加到 CXXFLAGS
-            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
+            # 获取父目录
+            ZEN_PARENT=$(dirname "$ZEN_PATH")
+            echo "Adding -I$ZEN_PARENT to CXXFLAGS"
+            # 将 -I$ZEN_PARENT 添加到 CXXFLAGS
+            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PARENT|" Makefile
           else
             echo "ERROR: zen directory not found at $ZEN_PATH"
             exit 1
           fi
-          # 同时创建符号链接，以备其他情况
+          # 可选：创建符号链接，但不必须
           ln -sf $ZEN_PATH zen
 
       - name: Prepare include path (Windows)
@@ -166,12 +170,12 @@ jobs:
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
           echo "=== Finding zen directory ==="
-          # Windows 路径转换：使用 cd ../.. 获取仓库根目录下的 zen
           ZEN_PATH="$(cd ../.. && pwd)/zen"
           if [ -d "$ZEN_PATH" ]; then
             echo "zen directory found at: $ZEN_PATH"
-            # 将 -I$ZEN_PATH 添加到 CXXFLAGS
-            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
+            ZEN_PARENT=$(dirname "$ZEN_PATH")
+            echo "Adding -I$ZEN_PARENT to CXXFLAGS"
+            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PARENT|" Makefile
           else
             echo "ERROR: zen directory not found at $ZEN_PATH"
             exit 1
