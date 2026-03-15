@@ -104,7 +104,7 @@ jobs:
           sudo ldconfig
 
       # ---------- Windows 依赖安装 (MSYS2) ----------
-      - name: Install Windows dependencies (MSYS2)
+      - name: Install Windows base dependencies (MSYS2)
         if: matrix.platform == 'windows'
         uses: msys2/setup-msys2@v2
         with:
@@ -114,12 +114,31 @@ jobs:
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-make
             mingw-w64-x86_64-boost
-            mingw-w64-x86_64-wxwidgets
             mingw-w64-x86_64-curl
             mingw-w64-x86_64-libssh2
             mingw-w64-x86_64-gtk3
             mingw-w64-x86_64-pkg-config
             mingw-w64-x86_64-openssl
+            wget
+            tar
+            patch
+
+      # Windows 下手动编译 wxWidgets 3.1.2（因为 MSYS2 仓库中无可用包）
+      - name: Build and install wxWidgets 3.1.2 (Windows)
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        run: |
+          cd $HOME
+          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
+          tar xf wxWidgets-3.1.2.tar.bz2
+          cd wxWidgets-3.1.2
+          mkdir -p build-msw
+          cd build-msw
+          ../configure --disable-shared --enable-unicode --prefix=/mingw64 \
+            --with-msw --with-libpng=builtin --with-libjpeg=builtin --with-libtiff=builtin \
+            --with-expat=builtin --with-zlib=builtin
+          make -j$(nproc)
+          make install
 
       # ---------- 修复头文件路径（创建符号链接 zen -> ../zen）----------
       - name: Fix include path for Linux
@@ -158,6 +177,9 @@ jobs:
           PKG_CONFIG_PATH: /mingw64/lib/pkgconfig
         run: |
           export PATH=/mingw64/bin:$PATH
+          # 确保 wx-config 在 PATH 中
+          export PATH=/mingw64/bin:$PATH
+          # 修改 Makefile 中编译器为 g++
           sed -i 's/\bg++\b/g++/g' Makefile
           make -j$(nproc)
           mkdir -p $GITHUB_WORKSPACE/artifacts/
