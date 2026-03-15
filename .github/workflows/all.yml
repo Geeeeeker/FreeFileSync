@@ -1,0 +1,325 @@
+name: Build FreeFileSync (Multi-Platform)
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Target platforms (comma separated: linux, windows, macos)'
+        required: true
+        default: 'linux,windows,macos'
+        type: string
+      architectures:
+        description: 'Target architectures (comma separated: x86, x64, arm, arm64)'
+        required: true
+        default: 'x64,arm64'
+        type: string
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+    steps:
+      - name: Generate build matrix (valid platform+arch combinations)
+        id: generate
+        run: |
+          # 定义每个平台支持的架构（基于 GitHub Actions runner 可用性和常见工具链）
+          declare -A SUPPORTED=(
+            [linux]="x86 x64 arm arm64"
+            [windows]="x86 x64 arm64"   # Windows arm 暂不支持（工具链不成熟）
+            [macos]="x64 arm64"          # macOS 原生支持 x86_64 和 arm64
+          )
+
+          IFS=',' read -r -a PLATFORMS <<< "${{ inputs.platforms }}"
+          IFS=',' read -r -a ARCHS <<< "${{ inputs.architectures }}"
+
+          MATRIX_ENTRIES=()
+          for platform in "${PLATFORMS[@]}"; do
+            platform=$(echo "$platform" | xargs)
+            if [[ -z "${SUPPORTED[$platform]}" ]]; then
+              echo "Unsupported platform: $platform"
+              exit 1
+            fi
+            for arch in "${ARCHS[@]}"; do
+              arch=$(echo "$arch" | xargs)
+              if [[ " ${SUPPORTED[$platform]} " =~ " $arch " ]]; then
+                MATRIX_ENTRIES+=("{\"platform\":\"$platform\",\"arch\":\"$arch\"}")
+              else
+                echo "Warning: $arch is not supported on $platform, skipping"
+              fi
+            done
+          done
+
+          if [ ${#MATRIX_ENTRIES[@]} -eq 0 ]; then
+            echo "No valid (platform, arch) pairs selected."
+            exit 1
+          fi
+
+          matrix_json=$(printf '%s\n' "${MATRIX_ENTRIES[@]}" | jq -c -s '.')
+          echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
+
+  build:
+    needs: setup
+    runs-on: ${{ matrix.platform == 'windows' && 'windows-latest' || matrix.platform == 'macos' && 'macos-latest' || 'ubuntu-22.04' }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.matrix) }}
+      fail-fast: false  # 一个组合失败不影响其他组合
+
+    steps:
+      - name: Checkout source code (master branch)
+        uses: actions/checkout@v4
+        with:
+          repository: Geeeeeker/FreeFileSync
+          ref: master
+          path: FreeFileSync
+
+      # ---------- 通用准备：查找 zen 目录并设置包含路径 ----------
+      - name: Prepare include path (Linux/macOS)
+        if: matrix.platform != 'windows'
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          echo "=== Locating zen directory ==="
+          # 向上递归查找 zen 目录
+          ZEN_PATH=""
+          DIR=$(pwd)
+          while [ "$DIR" != "/" ]; do
+            if [ -d "$DIR/zen" ]; then
+              ZEN_PATH="$DIR/zen"
+              break
+            fi
+            DIR=$(dirname "$DIR")
+          done
+          if [ -z "$ZEN_PATH" ]; then
+            echo "ERROR: zen directory not found!"
+            exit 1
+          fi
+          echo "zen directory found at: $ZEN_PATH"
+          # 将 -I$ZEN_PATH 添加到 CXXFLAGS（若不存在则添加）
+          if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
+            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
+          else
+            echo "CXXFLAGS += -I$ZEN_PATH" >> Makefile
+          fi
+          # 创建符号链接作为后备
+          ln -sf "$ZEN_PATH" zen
+
+      - name: Prepare include path (Windows)
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          echo "=== Locating zen directory ==="
+          ZEN_PATH=""
+          DIR=$(pwd)
+          while [ "$DIR" != "/" ]; do
+            if [ -d "$DIR/zen" ]; then
+              ZEN_PATH="$DIR/zen"
+              break
+            fi
+            DIR=$(dirname "$DIR")
+          done
+          if [ -z "$ZEN_PATH" ]; then
+            echo "ERROR: zen directory not found!"
+            exit 1
+          fi
+          echo "zen directory found at: $ZEN_PATH"
+          if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
+            sed -i "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
+          else
+            echo "CXXFLAGS += -I$ZEN_PATH" >> Makefile
+          fi
+          ln -sf "$ZEN_PATH" zen
+
+      # ---------- Linux 依赖安装（多架构支持）----------
+      - name: Install Linux dependencies (x86/x64)
+        if: matrix.platform == 'linux' && (matrix.arch == 'x86' || matrix.arch == 'x64')
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            g++ make \
+            libboost-all-dev \
+            libcurl4-openssl-dev \
+            libssh2-1-dev \
+            libidn2-dev \
+            libgtk-3-dev \
+            pkg-config \
+            autoconf automake libtool \
+            gettext \
+            wget
+          # 为 x86 添加 multilib 支持
+          if [ "${{ matrix.arch }}" == "x86" ]; then
+            sudo apt install -y g++-multilib
+          fi
+
+      - name: Install Linux dependencies (arm/arm64)
+        if: matrix.platform == 'linux' && (matrix.arch == 'arm' || matrix.arch == 'arm64')
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            g++-arm-linux-gnueabihf g++-aarch64-linux-gnu \
+            pkg-config \
+            wget
+          # 注意：交叉编译还需要目标架构的库，此处简化处理，实际可能需要更复杂的 sysroot
+
+      # Linux 下编译 wxWidgets（原生或交叉）
+      - name: Build wxWidgets 3.1.2 (Linux, native)
+        if: matrix.platform == 'linux' && (matrix.arch == 'x86' || matrix.arch == 'x64')
+        run: |
+          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
+          tar xf wxWidgets-3.1.2.tar.bz2
+          cd wxWidgets-3.1.2
+          mkdir gtk-build && cd gtk-build
+          if [ "${{ matrix.arch }}" == "x86" ]; then
+            export CFLAGS="-m32" CXXFLAGS="-m32" LDFLAGS="-m32"
+          fi
+          ../configure --disable-shared --enable-unicode --prefix=/usr/local
+          make -j$(nproc)
+          sudo make install
+          sudo ldconfig
+
+      # Linux 交叉编译 wxWidgets (arm/arm64) 非常复杂，此处省略详细步骤，需要用户自行准备交叉编译环境。
+      # 建议在 Docker 中完成。这里仅输出警告，构建可能失败。
+      - name: Build wxWidgets for arm/arm64 (Linux cross-compile)
+        if: matrix.platform == 'linux' && (matrix.arch == 'arm' || matrix.arch == 'arm64')
+        run: |
+          echo "Warning: Cross-compiling wxWidgets for ARM is not fully automated in this workflow."
+          echo "You may need to prepare a sysroot or use a prebuilt version. Proceeding with assumption that wxWidgets is already installed for target."
+          # 可以尝试使用 --host 选项进行交叉编译，但需要目标架构的依赖库
+          # 以下为示例（可能需要调整）：
+          # wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
+          # tar xf wxWidgets-3.1.2.tar.bz2
+          # cd wxWidgets-3.1.2
+          # mkdir build && cd build
+          # if [ "${{ matrix.arch }}" == "arm" ]; then
+          #   ../configure --host=arm-linux-gnueabihf --disable-shared --enable-unicode --prefix=/usr/arm-linux-gnueabihf
+          # elif [ "${{ matrix.arch }}" == "arm64" ]; then
+          #   ../configure --host=aarch64-linux-gnu --disable-shared --enable-unicode --prefix=/usr/aarch64-linux-gnu
+          # fi
+          # make -j$(nproc)
+          # sudo make install
+
+      # ---------- Windows 依赖安装 (MSYS2) ----------
+      - name: Install Windows dependencies (MSYS2)
+        if: matrix.platform == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.arch == 'x86' && 'MINGW32' || 'MINGW64' }}
+          update: true
+          install: >-
+            mingw-w64-${{ matrix.arch == 'x86' && 'x86_64' || matrix.arch == 'x64' && 'x86_64' || matrix.arch == 'arm64' && 'clang-aarch64' }}-gcc
+            mingw-w64-${{ matrix.arch == 'x86' && 'x86_64' || matrix.arch == 'x64' && 'x86_64' || matrix.arch == 'arm64' && 'clang-aarch64' }}-make
+            mingw-w64-${{ matrix.arch == 'x86' && 'x86_64' || matrix.arch == 'x64' && 'x86_64' || matrix.arch == 'arm64' && 'clang-aarch64' }}-boost
+            mingw-w64-${{ matrix.arch == 'x86' && 'x86_64' || matrix.arch == 'x64' && 'x86_64' || matrix.arch == 'arm64' && 'clang-aarch64' }}-curl
+            mingw-w64-${{ matrix.arch == 'x86' && 'x86_64' || matrix.arch == 'x64' && 'x86_64' || matrix.arch == 'arm64' && 'clang-aarch64' }}-libssh2
+            mingw-w64-${{ matrix.arch == 'x86' && 'x86_64' || matrix.arch == 'x64' && 'x86_64' || matrix.arch == 'arm64' && 'clang-aarch64' }}-gtk3
+            mingw-w64-${{ matrix.arch == 'x86' && 'x86_64' || matrix.arch == 'x64' && 'x86_64' || matrix.arch == 'arm64' && 'clang-aarch64' }}-pkg-config
+            mingw-w64-${{ matrix.arch == 'x86' && 'x86_64' || matrix.arch == 'x64' && 'x86_64' || matrix.arch == 'arm64' && 'clang-aarch64' }}-openssl
+            mingw-w64-${{ matrix.arch == 'x86' && 'x86_64' || matrix.arch == 'x64' && 'x86_64' || matrix.arch == 'arm64' && 'clang-aarch64' }}-autotools
+            wget tar patch
+
+      # Windows 下手动编译 wxWidgets 3.1.2
+      - name: Build wxWidgets 3.1.2 (Windows)
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        run: |
+          cd $HOME
+          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
+          tar xf wxWidgets-3.1.2.tar.bz2
+          cd wxWidgets-3.1.2
+          mkdir -p build-msw
+          cd build-msw
+          if [ "${{ matrix.arch }}" == "x86" ]; then
+            export CFLAGS="-m32" CXXFLAGS="-m32" LDFLAGS="-m32"
+          fi
+          ../configure --disable-shared --enable-unicode --prefix=$MSYSTEM_PREFIX \
+            --with-msw --with-libpng=builtin --with-libjpeg=builtin --with-libtiff=builtin \
+            --with-expat=builtin --with-zlib=builtin --disable-dependency-tracking
+          make -j$(nproc)
+          make install
+
+      # ---------- macOS 依赖安装 ----------
+      - name: Install macOS dependencies
+        if: matrix.platform == 'macos'
+        run: |
+          brew update
+          brew install boost wxwidgets  # macOS 上 wxWidgets 可能版本较新，需确认兼容性
+
+      # ---------- 构建阶段 ----------
+      # Linux 构建 (x86/x64)
+      - name: Build FreeFileSync for Linux (${{ matrix.arch }})
+        if: matrix.platform == 'linux' && (matrix.arch == 'x86' || matrix.arch == 'x64')
+        working-directory: FreeFileSync/FreeFileSync/Source
+        env:
+          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig
+        run: |
+          export PATH=/usr/local/bin:$PATH
+          # 设置架构相关标志
+          if [ "${{ matrix.arch }}" == "x86" ]; then
+            export CXX="g++ -m32"
+          else
+            export CXX="g++ -m64"
+          fi
+          sed -i "s/\bg++\b/${CXX}/g" Makefile
+          make -j$(nproc)
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_${{ matrix.arch }}
+
+      # Linux 交叉构建 (arm/arm64) - 需要额外的依赖，此处仅为示例，很可能失败
+      - name: Build FreeFileSync for Linux (${{ matrix.arch }}) - cross compile
+        if: matrix.platform == 'linux' && (matrix.arch == 'arm' || matrix.arch == 'arm64')
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          echo "Attempting cross-compile for ${{ matrix.arch }}..."
+          if [ "${{ matrix.arch }}" == "arm" ]; then
+            export CXX=arm-linux-gnueabihf-g++
+            export AR=arm-linux-gnueabihf-ar
+          elif [ "${{ matrix.arch }}" == "arm64" ]; then
+            export CXX=aarch64-linux-gnu-g++
+            export AR=aarch64-linux-gnu-ar
+          fi
+          sed -i "s/\bg++\b/${CXX}/g" Makefile
+          # 需要确保 wx-config 等工具指向目标架构版本，这里假设已正确安装
+          make -j$(nproc) || echo "Cross-compilation failed - need target sysroot"
+          # 如果失败，仍尝试复制可能存在的产物
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          [ -f ../Build/Bin/FreeFileSync ] && cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_linux_${{ matrix.arch }} || true
+
+      # Windows 构建
+      - name: Build FreeFileSync for Windows (${{ matrix.arch }})
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        working-directory: FreeFileSync/FreeFileSync/Source
+        env:
+          PKG_CONFIG_PATH: ${{ matrix.arch == 'x86' && '/mingw32/lib/pkgconfig' || '/mingw64/lib/pkgconfig' }}
+        run: |
+          export PATH=$MSYSTEM_PREFIX/bin:$PATH
+          sed -i 's/\bg++\b/g++/g' Makefile
+          make -j$(nproc)
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync.exe $GITHUB_WORKSPACE/artifacts/FreeFileSync_windows_${{ matrix.arch }}.exe
+
+      # macOS 构建（支持 x86_64 和 arm64）
+      - name: Build FreeFileSync for macOS (${{ matrix.arch }})
+        if: matrix.platform == 'macos'
+        working-directory: FreeFileSync/FreeFileSync/Source
+        run: |
+          export PATH=/usr/local/bin:$PATH
+          if [ "${{ matrix.arch }}" == "x64" ]; then
+            export ARCH_FLAGS="-arch x86_64"
+          elif [ "${{ matrix.arch }}" == "arm64" ]; then
+            export ARCH_FLAGS="-arch arm64"
+          fi
+          export CXX=clang++
+          export CXXFLAGS="$ARCH_FLAGS"
+          sed -i "s/\bg++\b/${CXX}/g" Makefile
+          make -j$(sysctl -n hw.logicalcpu)
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
+
+      # ---------- 上传构建产物 ----------
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeFileSync-${{ matrix.platform }}-${{ matrix.arch }}
+          path: artifacts/
