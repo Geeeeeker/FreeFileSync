@@ -1,21 +1,121 @@
-- name: Build FreeFileSync binary
-  run: |
-    cd FreeFileSync/FreeFileSync/Source
+name: Build FreeFileSync (macOS)
 
-    # 设置 pkg-config 路径
-    export PKG_CONFIG_PATH="$HOME/wx-install/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig"
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Target platforms (only macos supported)"
+        required: true
+        default: "macos"
+        type: string
+      architectures:
+        description: "Target architectures (comma separated: x86_64, arm64) [x64 will be mapped to x86_64]"
+        required: true
+        default: "x86_64,arm64"
+        type: string
 
-    # 清理旧构建
-    make clean || true
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+    steps:
+      - name: Generate build matrix
+        id: generate
+        run: |
+          declare -A SUPPORTED=(
+            [macos]="x86_64 arm64"
+          )
+          IFS=',' read -r -a PLATFORMS <<< "${{ inputs.platforms }}"
+          IFS=',' read -r -a ARCHS <<< "${{ inputs.architectures }}"
+          MATRIX_ENTRIES=()
+          for platform in "${PLATFORMS[@]}"; do
+            platform=$(echo "$platform" | xargs)
+            [[ -z "${SUPPORTED[$platform]}" ]] && { echo "Unsupported platform: $platform"; exit 1; }
+            for arch in "${ARCHS[@]}"; do
+              arch=$(echo "$arch" | xargs)
+              case $arch in
+                x64) arch="x86_64" ;;
+                arm64) arch="arm64" ;;
+                x86|arm) echo "Warning: $arch is not supported on macOS, skipping"; continue ;;
+              esac
+              if [[ " ${SUPPORTED[$platform]} " =~ " $arch " ]]; then
+                MATRIX_ENTRIES+=("{\"platform\":\"$platform\",\"arch\":\"$arch\"}")
+              else
+                echo "Warning: $arch is not supported on $platform, skipping"
+              fi
+            done
+          done
+          [ ${#MATRIX_ENTRIES[@]} -eq 0 ] && { echo "No valid (platform, arch) pairs selected."; exit 1; }
+          matrix_json=$(printf '%s\n' "${MATRIX_ENTRIES[@]}" | jq -c -s '.')
+          echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
 
-    # 显示 Makefile 内容（调试用）
-    echo "=== Makefile content ==="
-    cat Makefile
-    echo "========================"
+  build:
+    needs: setup
+    runs-on: ${{ fromJson('{"x86_64":"macos-13","arm64":"macos-14"}')[matrix.arch] }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.matrix) }}
+      fail-fast: false
 
-    # 构建：启用详细输出，强制 C++20，禁用并行以便捕获第一个错误
-    make V=1 -j1 CXX=clang++ CXXFLAGS="-std=c++20 -I$ZEN_PATH" LDFLAGS="-L$(brew --prefix)/lib"
+    steps:
+      - name: Checkout source code (master branch)
+        uses: actions/checkout@v4
+        with:
+          repository: Geeeeeker/FreeFileSync
+          ref: master
+          path: FreeFileSync
 
-    # 若成功，复制产物
-    mkdir -p $GITHUB_WORKSPACE/artifacts/
-    cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
+      - name: Install dependencies via Homebrew
+        run: |
+          brew update
+          brew install autoconf automake libtool pkg-config wget
+          brew install boost openssl libssh2 libidn2 curl
+
+      - name: Build wxWidgets (static)
+        run: |
+          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.2/wxWidgets-3.1.2.tar.bz2
+          tar xf wxWidgets-3.1.2.tar.bz2
+          cd wxWidgets-3.1.2
+          mkdir build-cocoa && cd build-cocoa
+          ../configure \
+            --disable-shared \
+            --enable-unicode \
+            --prefix=$HOME/wx-install \
+            --with-osx-cocoa \
+            CXXFLAGS="-stdlib=libc++" \
+            LDFLAGS="-stdlib=libc++" \
+            MACOSX_DEPLOYMENT_TARGET=10.15
+          make -j$(sysctl -n hw.logicalcpu)
+          make install
+          cd ../..
+
+      - name: Fix zen header path
+        run: |
+          cd FreeFileSync/FreeFileSync/Source
+          ZEN_PATH=$(find $GITHUB_WORKSPACE/FreeFileSync -type d -name zen | head -1)
+          if [ -n "$ZEN_PATH" ]; then
+            echo "zen directory found at: $ZEN_PATH"
+            sed -i.bak "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
+            rm -f Makefile.bak
+            ln -sf "$ZEN_PATH" zen
+          else
+            echo "ERROR: zen directory not found"
+            exit 1
+          fi
+
+      - name: Build FreeFileSync binary
+        run: |
+          cd FreeFileSync/FreeFileSync/Source
+          export PKG_CONFIG_PATH="$HOME/wx-install/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig"
+          make clean || true
+          # 启用详细输出、串行编译、C++20 标准
+          make V=1 -j1 CXX=clang++ CXXFLAGS="-std=c++20" LDFLAGS="-L$(brew --prefix)/lib"
+          mkdir -p $GITHUB_WORKSPACE/artifacts/
+          cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeFileSync-macos-${{ matrix.arch }}
+          path: artifacts/
