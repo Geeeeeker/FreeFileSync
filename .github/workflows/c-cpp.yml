@@ -22,7 +22,7 @@ env:
 
 jobs:
   ###########################################################################
-  # Linux 构建
+  # Linux 构建 (x86_64 原生, aarch64 使用 Docker + QEMU)
   ###########################################################################
   build-linux:
     runs-on: ubuntu-22.04
@@ -39,13 +39,10 @@ jobs:
           fi
           echo "Found source zip, extracting..."
           unzip -q "$SOURCE_ZIP_PATH" -d ffs-source-tmp
-          echo "Contents of temporary directory:"
-          ls -la ffs-source-tmp
-          # 如果临时目录下只有一个子目录，将其重命名为 ffs-source
+          # 解压后可能得到一个包含版本号的目录，统一重命名为 ffs-source
           if [ $(ls -1 ffs-source-tmp | wc -l) -eq 1 ] && [ -d "ffs-source-tmp/$(ls ffs-source-tmp)" ]; then
             mv "ffs-source-tmp/$(ls ffs-source-tmp)" ffs-source
           else
-            # 否则将所有内容移动到 ffs-source
             mkdir -p ffs-source
             mv ffs-source-tmp/* ffs-source/ 2>/dev/null || true
           fi
@@ -59,6 +56,7 @@ jobs:
           ARCH="${{ github.event.inputs.target }}"
           echo "arch=${ARCH#linux-}" >> $GITHUB_OUTPUT
 
+      ############ x86_64 原生构建 ############
       - name: Install native dependencies (x86_64)
         if: steps.arch.outputs.arch == 'x86_64'
         run: |
@@ -66,62 +64,79 @@ jobs:
           sudo apt install -y g++-11 make libboost-all-dev libssl-dev libssh2-1-dev libcurl4-openssl-dev
           sudo snap install cmake --classic
 
-      - name: Install cross-compilation dependencies (aarch64)
-        if: steps.arch.outputs.arch == 'aarch64'
-        run: |
-          sudo dpkg --add-architecture arm64
-          sudo apt update
-          sudo apt install -y g++-11-aarch64-linux-gnu gcc-11-aarch64-linux-gnu make \
-            libboost-all-dev libssl-dev:arm64 libssh2-1-dev:arm64 libcurl4-openssl-dev:arm64 \
-            libc6-dev:arm64 libstdc++-11-dev:arm64
-
-      - name: Cache wxWidgets build
+      - name: Cache wxWidgets build (x86_64)
+        if: steps.arch.outputs.arch == 'x86_64'
         id: cache-wx
         uses: actions/cache@v4
         with:
           path: ~/wx-install
-          key: ${{ runner.os }}-${{ steps.arch.outputs.arch }}-wxWidgets-3.1.5
+          key: ${{ runner.os }}-x86_64-wxWidgets-3.1.5
 
-      - name: Build and install wxWidgets (static)
-        if: steps.cache-wx.outputs.cache-hit != 'true'
+      - name: Build and install wxWidgets (x86_64)
+        if: steps.arch.outputs.arch == 'x86_64' && steps.cache-wx.outputs.cache-hit != 'true'
         run: |
           wget -q https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.5/wxWidgets-3.1.5.tar.bz2
           tar -xf wxWidgets-3.1.5.tar.bz2
           cd wxWidgets-3.1.5
           mkdir gtk-build && cd gtk-build
-          if [ "${{ steps.arch.outputs.arch }}" = "aarch64" ]; then
-            export CC=aarch64-linux-gnu-gcc-11
-            export CXX=aarch64-linux-gnu-g++-11
-            export AR=aarch64-linux-gnu-ar
-            export RANLIB=aarch64-linux-gnu-ranlib
-            HOST_FLAG="--host=aarch64-linux-gnu"
-          fi
-          ../configure $HOST_FLAG --disable-shared --enable-unicode --prefix=$HOME/wx-install
+          ../configure --disable-shared --enable-unicode --prefix=$HOME/wx-install
           make -j$(nproc)
           make install
 
-      - name: Apply code patches (if needed)
+      - name: Configure Makefile for x86_64
+        if: steps.arch.outputs.arch == 'x86_64'
         run: |
           cd ffs-source/FreeFileSync/Source
-          # 如果 14.7 仍有编译错误，可在此添加补丁命令
-          echo "No patches required for this version (check if needed)"
-
-      - name: Configure Makefile for architecture
-        run: |
-          cd ffs-source/FreeFileSync/Source
-          if [ "${{ steps.arch.outputs.arch }}" = "aarch64" ]; then
-            sed -i 's/^CXX = g++/CXX = aarch64-linux-gnu-g++-11/' Makefile
-          else
-            sed -i 's/^CXX = g++/CXX = g++-11/' Makefile
-          fi
+          sed -i 's/^CXX = g++/CXX = g++-11/' Makefile
           echo "LDFLAGS += -static-libstdc++ -static-libgcc" >> Makefile
           echo "CXXFLAGS += -I$HOME/wx-install/include" >> Makefile
           echo "LDFLAGS += -L$HOME/wx-install/lib" >> Makefile
 
-      - name: Build FreeFileSync
+      - name: Build FreeFileSync (x86_64)
+        if: steps.arch.outputs.arch == 'x86_64'
         run: |
           cd ffs-source/FreeFileSync/Source
           make -j$(nproc)
+
+      ############ aarch64 使用 Docker + QEMU ############
+      - name: Set up QEMU
+        if: steps.arch.outputs.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build in ARM64 container
+        if: steps.arch.outputs.arch == 'aarch64'
+        run: |
+          # 创建容器内构建脚本
+          cat > build-in-container.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          apt update
+          apt install -y wget make g++ libboost-all-dev libssl-dev libssh2-1-dev libcurl4-openssl-dev
+          # 编译 wxWidgets（版本 3.1.5）
+          wget -q https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.5/wxWidgets-3.1.5.tar.bz2
+          tar -xf wxWidgets-3.1.5.tar.bz2
+          cd wxWidgets-3.1.5
+          mkdir gtk-build && cd gtk-build
+          ../configure --disable-shared --enable-unicode --prefix=/wx-install
+          make -j$(nproc)
+          make install
+          # 编译 FreeFileSync
+          cd /workspace/ffs-source/FreeFileSync/Source
+          # 使用默认 g++（容器内已是原生 arm64 编译器）
+          sed -i 's/^CXX = g++/CXX = g++/' Makefile
+          echo "CXXFLAGS += -I/wx-install/include" >> Makefile
+          echo "LDFLAGS += -L/wx-install/lib -static-libstdc++ -static-libgcc" >> Makefile
+          make -j$(nproc)
+          EOF
+          chmod +x build-in-container.sh
+
+          # 运行 arm64 容器，挂载源码和脚本
+          docker run --rm --platform linux/arm64 \
+            -v $PWD/ffs-source:/workspace/ffs-source \
+            -v $PWD/build-in-container.sh:/build.sh \
+            ubuntu:22.04 /bin/bash /build.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -130,7 +145,7 @@ jobs:
           path: ffs-source/FreeFileSync/Build/Bin/
 
   ###########################################################################
-  # macOS 构建
+  # macOS 构建 (根据架构选择 runner)
   ###########################################################################
   build-macos:
     runs-on: ${{ (contains(github.event.inputs.target, 'arm64') && 'macos-14') || 'macos-13' }}
@@ -145,10 +160,7 @@ jobs:
             echo "Error: Source zip not found at $SOURCE_ZIP_PATH"
             exit 1
           fi
-          echo "Found source zip, extracting..."
           unzip -q "$SOURCE_ZIP_PATH" -d ffs-source-tmp
-          echo "Contents of temporary directory:"
-          ls -la ffs-source-tmp
           if [ $(ls -1 ffs-source-tmp | wc -l) -eq 1 ] && [ -d "ffs-source-tmp/$(ls ffs-source-tmp)" ]; then
             mv "ffs-source-tmp/$(ls ffs-source-tmp)" ffs-source
           else
@@ -156,7 +168,6 @@ jobs:
             mv ffs-source-tmp/* ffs-source/ 2>/dev/null || true
           fi
           rm -rf ffs-source-tmp
-          echo "Final source structure:"
           ls -la ffs-source
 
       - name: Extract architecture from target
@@ -169,11 +180,6 @@ jobs:
         run: |
           brew update
           brew install boost wxwidgets libssh2 curl
-
-      - name: Apply code patches (if needed)
-        run: |
-          cd ffs-source/FreeFileSync/Source
-          echo "No patches required for macOS (check if needed)"
 
       - name: Configure Makefile for architecture
         run: |
@@ -197,7 +203,7 @@ jobs:
           path: ffs-source/FreeFileSync/Build/Bin/
 
   ###########################################################################
-  # Windows 构建
+  # Windows 构建 (使用 Visual Studio)
   ###########################################################################
   build-windows:
     runs-on: windows-2022
@@ -214,21 +220,15 @@ jobs:
             Write-Error "Source zip not found at $zipPath"
             exit 1
           }
-          Write-Host "Found source zip, extracting..."
           Expand-Archive -Path $zipPath -DestinationPath ffs-source-tmp -Force
-          Write-Host "Contents of temporary directory:"
-          Get-ChildItem ffs-source-tmp
           $items = Get-ChildItem ffs-source-tmp
           if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
-            # 只有一个子目录，将其重命名为 ffs-source
             Rename-Item -Path $items[0].FullName -NewName "ffs-source"
           } else {
-            # 否则，创建 ffs-source 并将所有内容移入
             New-Item -ItemType Directory -Path ffs-source -Force
             Move-Item -Path ffs-source-tmp\* -Destination ffs-source\ -Force
           }
           Remove-Item -Recurse -Force ffs-source-tmp
-          Write-Host "Final source structure:"
           Get-ChildItem ffs-source
 
       - name: Extract architecture from target
