@@ -1,10 +1,10 @@
-name: Build FreeFileSync
+name: Build FreeFileSync (Selectable Target)
 
 on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Select target platform and architecture'
+        description: '选择要构建的平台和架构'
         required: true
         type: choice
         options:
@@ -17,66 +17,75 @@ on:
           - windows-arm64
 
 env:
-  FFS_VERSION: 14.8
-  RESOURCES_FALLBACK_VERSION: 14.7
+  FFS_VERSION: 14.7
+  # 如果 Resources.zip 缺失，从该版本下载（可修改为你的备用版本）
+  RESOURCES_FALLBACK_VERSION: 14.6
 
 jobs:
   ###########################################################################
-  # Linux x86_64
+  # Linux 构建 (运行在 ubuntu-22.04)
   ###########################################################################
-  linux-x86_64:
-    if: github.event.inputs.target == 'linux-x86_64'
+  build-linux:
     runs-on: ubuntu-22.04
+    if: startsWith(github.event.inputs.target, 'linux-')
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure Resources.zip exists
+      - name: Prepare source code
         run: |
-          if [ ! -f FreeFileSync/Build/Resources.zip ]; then
-              echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-              # 使用浏览器 User-Agent 下载
-              curl -A "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0" -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
-              
-              # 检查文件大小
-              size=$(wc -c < fallback.zip)
-              if [ $size -lt 1000000 ]; then
-                  echo "Downloaded file is too small ($size bytes), likely invalid. File content preview:"
-                  head -n 20 fallback.zip | cat -A
-                  exit 1
-              fi
-              
-              # 检查文件类型是否为 ZIP
-              if ! file fallback.zip | grep -qi "Zip archive"; then
-                  echo "Downloaded file is not a ZIP archive. Actual type: $(file fallback.zip)"
-                  echo "First 20 lines:"
-                  head -n 20 fallback.zip | cat -A
-                  exit 1
-              fi
-              
-              unzip -q fallback.zip -d fallback
-              found=$(find fallback -name "Resources.zip" -print -quit)
-              if [ -z "$found" ]; then
-                  echo "Could not find Resources.zip in the extracted files"
-                  exit 1
-              fi
-              mkdir -p FreeFileSync/Build
-              cp "$found" FreeFileSync/Build/
-              rm -rf fallback.zip fallback
+          # 如果存在源码压缩包则解压，否则直接使用 FreeFileSync/Source 作为源码根目录
+          if [ -f "FreeFileSync/Source/FreeFileSync/FreeFileSync_${FFS_VERSION}_Source.zip" ]; then
+            echo "Found source zip, extracting..."
+            unzip -q "FreeFileSync/Source/FreeFileSync/FreeFileSync_${FFS_VERSION}_Source.zip" -d ffs-source
+            mv ffs-source/FreeFileSync_*_Source ffs-source/FreeFileSync
+          elif [ -d "FreeFileSync/Source" ]; then
+            echo "Using existing source directory"
+            mkdir -p ffs-source
+            cp -r FreeFileSync/Source ffs-source/FreeFileSync
+          else
+            echo "Cannot find FreeFileSync source in repository"
+            exit 1
           fi
 
-      - name: Install dependencies
+      - name: Ensure Resources.zip exists
+        run: |
+          if [ ! -f ffs-source/FreeFileSync/Build/Resources.zip ]; then
+            echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
+            wget -q -O fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
+            unzip -q fallback.zip -d fallback
+            cp fallback/FreeFileSync_*/FreeFileSync/Build/Resources.zip ffs-source/FreeFileSync/Build/
+          fi
+
+      - name: Extract architecture from target
+        id: arch
+        run: |
+          # target 格式为 linux-xxx，取出第二部分
+          ARCH="${{ github.event.inputs.target }}"
+          echo "arch=${ARCH#linux-}" >> $GITHUB_OUTPUT
+
+      - name: Install native dependencies (x86_64)
+        if: steps.arch.outputs.arch == 'x86_64'
         run: |
           sudo apt update
           sudo apt install -y g++-11 make libboost-all-dev libssl-dev libssh2-1-dev libcurl4-openssl-dev
           sudo snap install cmake --classic
 
-      - name: Cache wxWidgets
+      - name: Install cross-compilation dependencies (aarch64)
+        if: steps.arch.outputs.arch == 'aarch64'
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo apt update
+          sudo apt install -y g++-11-aarch64-linux-gnu gcc-11-aarch64-linux-gnu make \
+            libboost-all-dev libssl-dev:arm64 libssh2-1-dev:arm64 libcurl4-openssl-dev:arm64 \
+            libc6-dev:arm64 libstdc++-11-dev:arm64
+
+      - name: Cache wxWidgets build
         id: cache-wx
         uses: actions/cache@v4
         with:
           path: ~/wx-install
-          key: linux-x86_64-wxWidgets-3.1.5
+          key: ${{ runner.os }}-${{ steps.arch.outputs.arch }}-wxWidgets-3.1.5
 
       - name: Build and install wxWidgets (static)
         if: steps.cache-wx.outputs.cache-hit != 'true'
@@ -85,484 +94,199 @@ jobs:
           tar -xf wxWidgets-3.1.5.tar.bz2
           cd wxWidgets-3.1.5
           mkdir gtk-build && cd gtk-build
-          ../configure --disable-shared --enable-unicode --prefix=$HOME/wx-install
+          if [ "${{ steps.arch.outputs.arch }}" = "aarch64" ]; then
+            export CC=aarch64-linux-gnu-gcc-11
+            export CXX=aarch64-linux-gnu-g++-11
+            export AR=aarch64-linux-gnu-ar
+            export RANLIB=aarch64-linux-gnu-ranlib
+            HOST_FLAG="--host=aarch64-linux-gnu"
+          fi
+          ../configure $HOST_FLAG --disable-shared --enable-unicode --prefix=$HOME/wx-install
           make -j$(nproc)
           make install
 
-      - name: Configure Makefile
+      - name: Apply code patches (if needed)
         run: |
-          cd FreeFileSync/Source
-          sed -i 's/^CXX = g++/CXX = g++-11/' Makefile
+          cd ffs-source/FreeFileSync/Source
+          # 如果 14.7 仍有编译错误，可在此添加补丁命令
+          echo "No patches required for this version (check if needed)"
+
+      - name: Configure Makefile for architecture
+        run: |
+          cd ffs-source/FreeFileSync/Source
+          if [ "${{ steps.arch.outputs.arch }}" = "aarch64" ]; then
+            sed -i 's/^CXX = g++/CXX = aarch64-linux-gnu-g++-11/' Makefile
+          else
+            sed -i 's/^CXX = g++/CXX = g++-11/' Makefile
+          fi
           echo "LDFLAGS += -static-libstdc++ -static-libgcc" >> Makefile
+          # 添加 wxWidgets 库路径
+          echo "CXXFLAGS += -I$HOME/wx-install/include" >> Makefile
+          echo "LDFLAGS += -L$HOME/wx-install/lib" >> Makefile
 
       - name: Build FreeFileSync
         run: |
-          cd FreeFileSync/Source
+          cd ffs-source/FreeFileSync/Source
           make -j$(nproc)
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FreeFileSync-linux-x86_64
-          path: FreeFileSync/Build/Bin/
+          name: FreeFileSync-Linux-${{ steps.arch.outputs.arch }}
+          path: ffs-source/FreeFileSync/Build/Bin/
 
   ###########################################################################
-  # Linux aarch64
+  # macOS 构建 (根据架构选择 runner)
   ###########################################################################
-  linux-aarch64:
-    if: github.event.inputs.target == 'linux-aarch64'
-    runs-on: ubuntu-22.04
+  build-macos:
+    runs-on: ${{ (contains(github.event.inputs.target, 'arm64') && 'macos-14') || 'macos-13' }}
+    if: startsWith(github.event.inputs.target, 'macos-')
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure Resources.zip exists
+      - name: Prepare source code
         run: |
-          if [ ! -f FreeFileSync/Build/Resources.zip ]; then
-              echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-              curl -A "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0" -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
-              
-              size=$(wc -c < fallback.zip)
-              if [ $size -lt 1000000 ]; then
-                  echo "Downloaded file is too small ($size bytes), likely invalid. File content preview:"
-                  head -n 20 fallback.zip | cat -A
-                  exit 1
-              fi
-              
-              if ! file fallback.zip | grep -qi "Zip archive"; then
-                  echo "Downloaded file is not a ZIP archive. Actual type: $(file fallback.zip)"
-                  echo "First 20 lines:"
-                  head -n 20 fallback.zip | cat -A
-                  exit 1
-              fi
-              
-              unzip -q fallback.zip -d fallback
-              found=$(find fallback -name "Resources.zip" -print -quit)
-              if [ -z "$found" ]; then
-                  echo "Could not find Resources.zip in the extracted files"
-                  exit 1
-              fi
-              mkdir -p FreeFileSync/Build
-              cp "$found" FreeFileSync/Build/
-              rm -rf fallback.zip fallback
+          if [ -f "FreeFileSync/Source/FreeFileSync/FreeFileSync_${FFS_VERSION}_Source.zip" ]; then
+            echo "Found source zip, extracting..."
+            unzip -q "FreeFileSync/Source/FreeFileSync/FreeFileSync_${FFS_VERSION}_Source.zip" -d ffs-source
+            mv ffs-source/FreeFileSync_*_Source ffs-source/FreeFileSync
+          elif [ -d "FreeFileSync/Source" ]; then
+            echo "Using existing source directory"
+            mkdir -p ffs-source
+            cp -r FreeFileSync/Source ffs-source/FreeFileSync
+          else
+            echo "Cannot find FreeFileSync source in repository"
+            exit 1
           fi
-
-      - name: Install cross-compilation dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y g++-11-aarch64-linux-gnu gcc-11-aarch64-linux-gnu make \
-            libboost-all-dev libssl-dev:arm64 libssh2-1-dev:arm64 libcurl4-openssl-dev:arm64
-          sudo dpkg --add-architecture arm64
-          sudo apt update
-          sudo apt install -y libc6-dev:arm64 libstdc++-11-dev:arm64
-
-      - name: Cache wxWidgets (aarch64)
-        id: cache-wx
-        uses: actions/cache@v4
-        with:
-          path: ~/wx-install-aarch64
-          key: linux-aarch64-wxWidgets-3.1.5
-
-      - name: Build and install wxWidgets (aarch64 static)
-        if: steps.cache-wx.outputs.cache-hit != 'true'
-        run: |
-          wget -q https://github.com/wxWidgets/wxWidgets/releases/download/v3.1.5/wxWidgets-3.1.5.tar.bz2
-          tar -xf wxWidgets-3.1.5.tar.bz2
-          cd wxWidgets-3.1.5
-          mkdir gtk-build && cd gtk-build
-          export CC=aarch64-linux-gnu-gcc-11
-          export CXX=aarch64-linux-gnu-g++-11
-          export AR=aarch64-linux-gnu-ar
-          export RANLIB=aarch64-linux-gnu-ranlib
-          ../configure --host=aarch64-linux-gnu --disable-shared --enable-unicode --prefix=$HOME/wx-install-aarch64
-          make -j$(nproc)
-          make install
-
-      - name: Configure Makefile for aarch64
-        run: |
-          cd FreeFileSync/Source
-          sed -i 's/^CXX = g++/CXX = aarch64-linux-gnu-g++-11/' Makefile
-          echo "LDFLAGS += -static-libstdc++ -static-libgcc" >> Makefile
-
-      - name: Build FreeFileSync
-        run: |
-          cd FreeFileSync/Source
-          make -j$(nproc)
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeFileSync-linux-aarch64
-          path: FreeFileSync/Build/Bin/
-
-  ###########################################################################
-  # macOS x86_64
-  ###########################################################################
-  macos-x86_64:
-    if: github.event.inputs.target == 'macos-x86_64'
-    runs-on: macos-13
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
       - name: Ensure Resources.zip exists
         run: |
-          if [ ! -f FreeFileSync/Build/Resources.zip ]; then
-              echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-              curl -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 13.0; rv:109.0) Gecko/20100101 Firefox/115.0" -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
-              
-              size=$(wc -c < fallback.zip)
-              if [ $size -lt 1000000 ]; then
-                  echo "Downloaded file is too small ($size bytes), likely invalid. File content preview:"
-                  head -n 20 fallback.zip | cat -A
-                  exit 1
-              fi
-              
-              if ! file fallback.zip | grep -qi "Zip archive"; then
-                  echo "Downloaded file is not a ZIP archive. Actual type: $(file fallback.zip)"
-                  echo "First 20 lines:"
-                  head -n 20 fallback.zip | cat -A
-                  exit 1
-              fi
-              
-              unzip -q fallback.zip -d fallback
-              found=$(find fallback -name "Resources.zip" -print -quit)
-              if [ -z "$found" ]; then
-                  echo "Could not find Resources.zip in the extracted files"
-                  exit 1
-              fi
-              mkdir -p FreeFileSync/Build
-              cp "$found" FreeFileSync/Build/
-              rm -rf fallback.zip fallback
+          if [ ! -f ffs-source/FreeFileSync/Build/Resources.zip ]; then
+            echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
+            curl -L -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
+            unzip -q fallback.zip -d fallback
+            cp fallback/FreeFileSync_*/FreeFileSync/Build/Resources.zip ffs-source/FreeFileSync/Build/
           fi
+
+      - name: Extract architecture from target
+        id: arch
+        run: |
+          ARCH="${{ github.event.inputs.target }}"
+          echo "arch=${ARCH#macos-}" >> $GITHUB_OUTPUT
 
       - name: Install Homebrew dependencies
         run: |
           brew update
           brew install boost wxwidgets libssh2 curl
 
-      - name: Configure Makefile for x86_64
+      - name: Apply code patches (if needed)
         run: |
-          cd FreeFileSync/Source
-          sed -i '' 's/^CXX = g++/CXX = clang++ -arch x86_64/' Makefile
-          echo "LDFLAGS += -framework CoreFoundation -framework Security" >> Makefile
+          cd ffs-source/FreeFileSync/Source
+          echo "No patches required for macOS (check if needed)"
 
-      - name: Build FreeFileSync
+      - name: Configure Makefile for architecture
         run: |
-          cd FreeFileSync/Source
-          make -j$(sysctl -n hw.ncpu)
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeFileSync-macos-x86_64
-          path: FreeFileSync/Build/Bin/
-
-  ###########################################################################
-  # macOS arm64
-  ###########################################################################
-  macos-arm64:
-    if: github.event.inputs.target == 'macos-arm64'
-    runs-on: macos-14
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Ensure Resources.zip exists
-        run: |
-          if [ ! -f FreeFileSync/Build/Resources.zip ]; then
-              echo "Resources.zip missing, downloading from version $RESOURCES_FALLBACK_VERSION"
-              curl -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0; rv:109.0) Gecko/20100101 Firefox/115.0" -fL -o fallback.zip "https://freefilesync.org/download/FreeFileSync_${RESOURCES_FALLBACK_VERSION}_Source.zip"
-              
-              size=$(wc -c < fallback.zip)
-              if [ $size -lt 1000000 ]; then
-                  echo "Downloaded file is too small ($size bytes), likely invalid. File content preview:"
-                  head -n 20 fallback.zip | cat -A
-                  exit 1
-              fi
-              
-              if ! file fallback.zip | grep -qi "Zip archive"; then
-                  echo "Downloaded file is not a ZIP archive. Actual type: $(file fallback.zip)"
-                  echo "First 20 lines:"
-                  head -n 20 fallback.zip | cat -A
-                  exit 1
-              fi
-              
-              unzip -q fallback.zip -d fallback
-              found=$(find fallback -name "Resources.zip" -print -quit)
-              if [ -z "$found" ]; then
-                  echo "Could not find Resources.zip in the extracted files"
-                  exit 1
-              fi
-              mkdir -p FreeFileSync/Build
-              cp "$found" FreeFileSync/Build/
-              rm -rf fallback.zip fallback
+          cd ffs-source/FreeFileSync/Source
+          if [ "${{ steps.arch.outputs.arch }}" = "arm64" ]; then
+            sed -i '' 's/^CXX = g++/CXX = clang++ -arch arm64/' Makefile
+          else
+            sed -i '' 's/^CXX = g++/CXX = clang++ -arch x86_64/' Makefile
           fi
-
-      - name: Install Homebrew dependencies
-        run: |
-          brew update
-          brew install boost wxwidgets libssh2 curl
-
-      - name: Configure Makefile for arm64
-        run: |
-          cd FreeFileSync/Source
-          sed -i '' 's/^CXX = g++/CXX = clang++ -arch arm64/' Makefile
           echo "LDFLAGS += -framework CoreFoundation -framework Security" >> Makefile
 
       - name: Build FreeFileSync
         run: |
-          cd FreeFileSync/Source
+          cd ffs-source/FreeFileSync/Source
           make -j$(sysctl -n hw.ncpu)
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FreeFileSync-macos-arm64
-          path: FreeFileSync/Build/Bin/
+          name: FreeFileSync-macOS-${{ steps.arch.outputs.arch }}
+          path: ffs-source/FreeFileSync/Build/Bin/
 
   ###########################################################################
-  # Windows x86
+  # Windows 构建 (运行在 windows-2022)
   ###########################################################################
-  windows-x86:
-    if: github.event.inputs.target == 'windows-x86'
+  build-windows:
     runs-on: windows-2022
+    if: startsWith(github.event.inputs.target, 'windows-')
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure Resources.zip exists
+      - name: Prepare source code
         shell: pwsh
         run: |
-          $resourcesPath = "FreeFileSync/Build/Resources.zip"
-          if (-not (Test-Path $resourcesPath)) {
-              Write-Host "Resources.zip missing, attempting to download from version $env:RESOURCES_FALLBACK_VERSION"
-              $fallbackUrl = "https://freefilesync.org/download/FreeFileSync_$env:RESOURCES_FALLBACK_VERSION`_Source.zip"
-              $fallbackZip = "fallback.zip"
-              
-              Write-Host "Downloading from $fallbackUrl"
-              # 使用浏览器 User-Agent 下载
-              curl.exe -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0" -L -f -o $fallbackZip $fallbackUrl
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Error "Failed to download fallback source from $fallbackUrl"
-                  exit 1
-              }
-              
-              # 检查文件大小
-              $fileSize = (Get-Item $fallbackZip).Length
-              if ($fileSize -lt 1MB) {
-                  Write-Error "Downloaded file is too small ($fileSize bytes), likely invalid. File content preview:"
-                  Get-Content -Path $fallbackZip -TotalCount 20 -Encoding Byte | ForEach-Object { Write-Host "$_ " -NoNewline }
-                  Write-Host ""
-                  exit 1
-              }
-              
-              # 检查文件头是否为 ZIP (PK..)
-              $header = Get-Content -Path $fallbackZip -TotalCount 4 -Encoding Byte
-              if ($header[0] -ne 0x50 -or $header[1] -ne 0x4B) {
-                  Write-Error "Downloaded file is not a ZIP archive (header: $header). First 20 bytes:"
-                  Get-Content -Path $fallbackZip -TotalCount 20 -Encoding Byte | ForEach-Object { Write-Host "$_ " -NoNewline }
-                  Write-Host ""
-                  exit 1
-              }
-              
-              $tempDir = "fallback_temp"
-              Expand-Archive -Path $fallbackZip -DestinationPath $tempDir -Force
-              
-              $foundResource = Get-ChildItem -Path $tempDir -Recurse -Filter "Resources.zip" | Select-Object -First 1
-              if (-not $foundResource) {
-                  Write-Error "Could not find Resources.zip in the extracted files"
-                  exit 1
-              }
-              
-              New-Item -ItemType Directory -Force -Path (Split-Path $resourcesPath -Parent) | Out-Null
-              Copy-Item -Path $foundResource.FullName -Destination $resourcesPath -Force
-              Write-Host "Resources.zip successfully placed at $resourcesPath"
-              
-              Remove-Item -Path $fallbackZip -Force
-              Remove-Item -Path $tempDir -Recurse -Force
+          $zipPath = "FreeFileSync/Source/FreeFileSync/FreeFileSync_$env:FFS_VERSION`_Source.zip"
+          if (Test-Path $zipPath) {
+            Write-Host "Found source zip, extracting..."
+            Expand-Archive -Path $zipPath -DestinationPath ffs-source -Force
+            Get-ChildItem -Path ffs-source -Directory | Rename-Item -NewName "FreeFileSync"
+          } elseif (Test-Path "FreeFileSync/Source") {
+            Write-Host "Using existing source directory"
+            New-Item -ItemType Directory -Path ffs-source -Force
+            Copy-Item -Recurse "FreeFileSync/Source" -Destination "ffs-source/FreeFileSync"
+          } else {
+            Write-Error "Cannot find FreeFileSync source in repository"
+            exit 1
           }
-
-      - name: Install vcpkg and dependencies (x86)
-        run: |
-          git clone https://github.com/Microsoft/vcpkg.git
-          .\vcpkg\bootstrap-vcpkg.bat
-          .\vcpkg\vcpkg install boost wxwidgets libssh2 curl --triplet x86-windows-static
-
-      - name: Set up Visual Studio environment
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Build FreeFileSync (x86)
-        run: |
-          cd FreeFileSync/Source
-          $vcpkgPath = "$pwd\..\..\vcpkg\scripts\buildsystems\vcpkg.cmake"
-          msbuild FreeFileSync.sln /p:Configuration=Release /p:Platform=Win32 `
-            /p:VcpkgTriplet=x86-windows-static /p:VcpkgEnabled=true /p:VcpkgRoot="$pwd\..\..\vcpkg\installed"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeFileSync-windows-x86
-          path: FreeFileSync/Build/Bin/
-
-  ###########################################################################
-  # Windows x64
-  ###########################################################################
-  windows-x64:
-    if: github.event.inputs.target == 'windows-x64'
-    runs-on: windows-2022
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
       - name: Ensure Resources.zip exists
         shell: pwsh
         run: |
-          $resourcesPath = "FreeFileSync/Build/Resources.zip"
-          if (-not (Test-Path $resourcesPath)) {
-              Write-Host "Resources.zip missing, attempting to download from version $env:RESOURCES_FALLBACK_VERSION"
-              $fallbackUrl = "https://freefilesync.org/download/FreeFileSync_$env:RESOURCES_FALLBACK_VERSION`_Source.zip"
-              $fallbackZip = "fallback.zip"
-              
-              Write-Host "Downloading from $fallbackUrl"
-              curl.exe -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0" -L -f -o $fallbackZip $fallbackUrl
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Error "Failed to download fallback source from $fallbackUrl"
-                  exit 1
-              }
-              
-              $fileSize = (Get-Item $fallbackZip).Length
-              if ($fileSize -lt 1MB) {
-                  Write-Error "Downloaded file is too small ($fileSize bytes), likely invalid. File content preview:"
-                  Get-Content -Path $fallbackZip -TotalCount 20 -Encoding Byte | ForEach-Object { Write-Host "$_ " -NoNewline }
-                  Write-Host ""
-                  exit 1
-              }
-              
-              $header = Get-Content -Path $fallbackZip -TotalCount 4 -Encoding Byte
-              if ($header[0] -ne 0x50 -or $header[1] -ne 0x4B) {
-                  Write-Error "Downloaded file is not a ZIP archive (header: $header). First 20 bytes:"
-                  Get-Content -Path $fallbackZip -TotalCount 20 -Encoding Byte | ForEach-Object { Write-Host "$_ " -NoNewline }
-                  Write-Host ""
-                  exit 1
-              }
-              
-              $tempDir = "fallback_temp"
-              Expand-Archive -Path $fallbackZip -DestinationPath $tempDir -Force
-              
-              $foundResource = Get-ChildItem -Path $tempDir -Recurse -Filter "Resources.zip" | Select-Object -First 1
-              if (-not $foundResource) {
-                  Write-Error "Could not find Resources.zip in the extracted files"
-                  exit 1
-              }
-              
-              New-Item -ItemType Directory -Force -Path (Split-Path $resourcesPath -Parent) | Out-Null
-              Copy-Item -Path $foundResource.FullName -Destination $resourcesPath -Force
-              Write-Host "Resources.zip successfully placed at $resourcesPath"
-              
-              Remove-Item -Path $fallbackZip -Force
-              Remove-Item -Path $tempDir -Recurse -Force
+          if (-not (Test-Path "ffs-source/FreeFileSync/Build/Resources.zip")) {
+            Write-Host "Resources.zip missing, downloading from version $env:RESOURCES_FALLBACK_VERSION"
+            $fallbackUrl = "https://freefilesync.org/download/FreeFileSync_$env:RESOURCES_FALLBACK_VERSION`_Source.zip"
+            Invoke-WebRequest -Uri $fallbackUrl -OutFile fallback.zip
+            Expand-Archive -Path fallback.zip -DestinationPath fallback -Force
+            Copy-Item "fallback/FreeFileSync_*/FreeFileSync/Build/Resources.zip" -Destination "ffs-source/FreeFileSync/Build/"
           }
 
-      - name: Install vcpkg and dependencies (x64)
-        run: |
-          git clone https://github.com/Microsoft/vcpkg.git
-          .\vcpkg\bootstrap-vcpkg.bat
-          .\vcpkg\vcpkg install boost wxwidgets libssh2 curl --triplet x64-windows-static
-
-      - name: Set up Visual Studio environment
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Build FreeFileSync (x64)
-        run: |
-          cd FreeFileSync/Source
-          $vcpkgPath = "$pwd\..\..\vcpkg\scripts\buildsystems\vcpkg.cmake"
-          msbuild FreeFileSync.sln /p:Configuration=Release /p:Platform=x64 `
-            /p:VcpkgTriplet=x64-windows-static /p:VcpkgEnabled=true /p:VcpkgRoot="$pwd\..\..\vcpkg\installed"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeFileSync-windows-x64
-          path: FreeFileSync/Build/Bin/
-
-  ###########################################################################
-  # Windows arm64
-  ###########################################################################
-  windows-arm64:
-    if: github.event.inputs.target == 'windows-arm64'
-    runs-on: windows-2022
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Ensure Resources.zip exists
+      - name: Extract architecture from target
+        id: arch
         shell: pwsh
         run: |
-          $resourcesPath = "FreeFileSync/Build/Resources.zip"
-          if (-not (Test-Path $resourcesPath)) {
-              Write-Host "Resources.zip missing, attempting to download from version $env:RESOURCES_FALLBACK_VERSION"
-              $fallbackUrl = "https://freefilesync.org/download/FreeFileSync_$env:RESOURCES_FALLBACK_VERSION`_Source.zip"
-              $fallbackZip = "fallback.zip"
-              
-              Write-Host "Downloading from $fallbackUrl"
-              curl.exe -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0" -L -f -o $fallbackZip $fallbackUrl
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Error "Failed to download fallback source from $fallbackUrl"
-                  exit 1
-              }
-              
-              $fileSize = (Get-Item $fallbackZip).Length
-              if ($fileSize -lt 1MB) {
-                  Write-Error "Downloaded file is too small ($fileSize bytes), likely invalid. File content preview:"
-                  Get-Content -Path $fallbackZip -TotalCount 20 -Encoding Byte | ForEach-Object { Write-Host "$_ " -NoNewline }
-                  Write-Host ""
-                  exit 1
-              }
-              
-              $header = Get-Content -Path $fallbackZip -TotalCount 4 -Encoding Byte
-              if ($header[0] -ne 0x50 -or $header[1] -ne 0x4B) {
-                  Write-Error "Downloaded file is not a ZIP archive (header: $header). First 20 bytes:"
-                  Get-Content -Path $fallbackZip -TotalCount 20 -Encoding Byte | ForEach-Object { Write-Host "$_ " -NoNewline }
-                  Write-Host ""
-                  exit 1
-              }
-              
-              $tempDir = "fallback_temp"
-              Expand-Archive -Path $fallbackZip -DestinationPath $tempDir -Force
-              
-              $foundResource = Get-ChildItem -Path $tempDir -Recurse -Filter "Resources.zip" | Select-Object -First 1
-              if (-not $foundResource) {
-                  Write-Error "Could not find Resources.zip in the extracted files"
-                  exit 1
-              }
-              
-              New-Item -ItemType Directory -Force -Path (Split-Path $resourcesPath -Parent) | Out-Null
-              Copy-Item -Path $foundResource.FullName -Destination $resourcesPath -Force
-              Write-Host "Resources.zip successfully placed at $resourcesPath"
-              
-              Remove-Item -Path $fallbackZip -Force
-              Remove-Item -Path $tempDir -Recurse -Force
-          }
+          $target = "${{ github.event.inputs.target }}"
+          $arch = $target -replace '^windows-', ''
+          echo "arch=$arch" >> $env:GITHUB_OUTPUT
 
-      - name: Install vcpkg and dependencies (arm64)
+      - name: Install vcpkg and dependencies
+        shell: pwsh
         run: |
           git clone https://github.com/Microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
-          .\vcpkg\vcpkg install boost wxwidgets libssh2 curl --triplet arm64-windows-static
+          $triplet = @{
+            "x86" = "x86-windows-static"
+            "x64" = "x64-windows-static"
+            "arm64" = "arm64-windows-static"
+          }["${{ steps.arch.outputs.arch }}"]
+          .\vcpkg\vcpkg install boost wxwidgets libssh2 curl --triplet $triplet
+          echo "VCPKG_ROOT=$pwd\vcpkg" >> $env:GITHUB_ENV
 
       - name: Set up Visual Studio environment
         uses: microsoft/setup-msbuild@v2
 
-      - name: Build FreeFileSync (arm64)
+      - name: Build FreeFileSync (using solution file)
+        shell: pwsh
         run: |
-          cd FreeFileSync/Source
-          $vcpkgPath = "$pwd\..\..\vcpkg\scripts\buildsystems\vcpkg.cmake"
-          msbuild FreeFileSync.sln /p:Configuration=Release /p:Platform=ARM64 `
-            /p:VcpkgTriplet=arm64-windows-static /p:VcpkgEnabled=true /p:VcpkgRoot="$pwd\..\..\vcpkg\installed"
+          cd ffs-source/FreeFileSync/Source
+          $platform = @{
+            "x86" = "Win32"
+            "x64" = "x64"
+            "arm64" = "ARM64"
+          }["${{ steps.arch.outputs.arch }}"]
+          $vcpkgTriplet = @{
+            "x86" = "x86-windows-static"
+            "x64" = "x64-windows-static"
+            "arm64" = "arm64-windows-static"
+          }["${{ steps.arch.outputs.arch }}"]
+          msbuild FreeFileSync.sln /p:Configuration=Release /p:Platform=$platform `
+            /p:VcpkgTriplet=$vcpkgTriplet /p:VcpkgEnabled=true /p:VcpkgRoot="$env:VCPKG_ROOT\installed"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FreeFileSync-windows-arm64
-          path: FreeFileSync/Build/Bin/
+          name: FreeFileSync-Windows-${{ steps.arch.outputs.arch }}
+          path: ffs-source/FreeFileSync/Build/Bin/
