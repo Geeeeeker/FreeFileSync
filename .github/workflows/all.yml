@@ -18,7 +18,6 @@ jobs:
       - name: Generate build matrix
         id: generate
         run: |
-          # 支持的架构
           SUPPORTED="x86_64 arm64"
           IFS=',' read -r -a ARCHS <<< "${{ inputs.architectures }}"
           MATRIX_ENTRIES=()
@@ -58,7 +57,6 @@ jobs:
           brew update
           brew install boost wxwidgets libssh2 pkg-config
 
-      # 修复头文件：确保 zen/string_base.h 包含 <atomic>
       - name: Apply atomic header patch
         working-directory: FreeFileSync/FreeFileSync
         run: |
@@ -75,12 +73,10 @@ jobs:
             echo "zen/string_base.h not found, skipping patch"
           fi
 
-      # 定位 zen 目录并修复头文件包含路径
       - name: Locate zen directory and fix includes
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
           echo "=== Locating zen directory ==="
-          # 从当前目录向上查找包含 zen 的目录
           ZEN_PATH=""
           DIR=$(pwd)
           while [ "$DIR" != "/" ]; do
@@ -95,13 +91,12 @@ jobs:
             exit 1
           fi
           echo "zen directory found at: $ZEN_PATH"
-          # 将 -I$ZEN_PATH 添加到 CXXFLAGS
+          # 添加 -I 路径到 CXXFLAGS
           if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
-            sed -i "" "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
+            sed -i '' "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
           else
             echo "CXXFLAGS += -I$ZEN_PATH" >> Makefile
           fi
-          # 创建符号链接，以备其他情况
           ln -sf "$ZEN_PATH" zen
 
       - name: Build FreeFileSync for ${{ matrix.arch }}
@@ -110,7 +105,6 @@ jobs:
           ARCH: ${{ matrix.arch }}
           PKG_CONFIG_PATH: /usr/local/lib/pkgconfig
         run: |
-          # 设置架构标志
           if [ "$ARCH" = "x86_64" ]; then
             ARCH_FLAGS="-arch x86_64"
           elif [ "$ARCH" = "arm64" ]; then
@@ -120,18 +114,15 @@ jobs:
             exit 1
           fi
 
-          # 确保使用 clang，并启用 C++23 标准（与 Linux 保持一致）
           export CXX=clang++
           export CXXFLAGS="$ARCH_FLAGS -std=c++23 -stdlib=libc++"
           export LDFLAGS="$ARCH_FLAGS"
 
-          # 修改 Makefile 中的编译器（将 g++ 替换为 clang++）
-          sed -i "" 's/\bg++\b/clang++/g' Makefile
+          # 修改 Makefile 中的编译器
+          sed -i '' 's/\bg++\b/clang++/g' Makefile
 
-          # 编译
           make -j$(sysctl -n hw.logicalcpu)
 
-          # 复制产物
           mkdir -p $GITHUB_WORKSPACE/artifacts/
           cp ../Build/Bin/FreeFileSync $GITHUB_WORKSPACE/artifacts/FreeFileSync_macos_${{ matrix.arch }}
 
