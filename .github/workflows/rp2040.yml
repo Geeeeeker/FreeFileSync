@@ -1,0 +1,49 @@
+name: Build RP2040 Mac Emulator
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive  # 如果项目使用了子模块（如 Pico SDK），一并拉取
+
+      - name: Install ARM GCC toolchain
+        run: |
+          sudo apt update
+          sudo apt install -y gcc-arm-none-eabi cmake build-essential
+
+      - name: Setup Pico SDK (if not included as submodule)
+        # 如果你的项目没有将 Pico SDK 作为子模块，可以在此手动克隆
+        if: false  # 根据实际情况启用
+        run: |
+          git clone https://github.com/raspberrypi/pico-sdk.git
+          cd pico-sdk
+          git checkout master
+          git submodule update --init
+          echo "PICO_SDK_PATH=$GITHUB_WORKSPACE/pico-sdk" >> $GITHUB_ENV
+
+      - name: Configure CMake
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build firmware
+        run: |
+          cd build
+          make -j$(nproc)
+
+      - name: Upload UF2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rp2040-mac-emulator
+          path: build/*.uf2
