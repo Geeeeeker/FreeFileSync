@@ -57,22 +57,15 @@ jobs:
           brew update
           brew install boost wxwidgets libssh2 pkg-config
 
+      # 修复头文件：在 zen/string_base.h 开头插入 #include <atomic>（单行命令）
       - name: Apply atomic header patch
         working-directory: FreeFileSync/FreeFileSync
         run: |
-          if [ -f zen/string_base.h ]; then
-            if ! grep -q '#include <atomic>' zen/string_base.h; then
-              echo "Adding #include <atomic> to zen/string_base.h"
-              sed -i '' '1i\
-#include <atomic>
-' zen/string_base.h
-            else
-              echo "zen/string_base.h already includes <atomic>"
-            fi
-          else
-            echo "zen/string_base.h not found, skipping patch"
+          if [ -f zen/string_base.h ] && ! grep -q '#include <atomic>' zen/string_base.h; then
+            echo '#include <atomic>' | cat - zen/string_base.h > temp && mv temp zen/string_base.h
           fi
 
+      # 定位 zen 目录并添加包含路径
       - name: Locate zen directory and fix includes
         working-directory: FreeFileSync/FreeFileSync/Source
         run: |
@@ -91,7 +84,6 @@ jobs:
             exit 1
           fi
           echo "zen directory found at: $ZEN_PATH"
-          # 添加 -I 路径到 CXXFLAGS
           if grep -q '^CXXFLAGS[[:space:]]*+=' Makefile; then
             sed -i '' "s|^\(CXXFLAGS[[:space:]]*+=\)|\1 -I$ZEN_PATH|" Makefile
           else
@@ -118,7 +110,6 @@ jobs:
           export CXXFLAGS="$ARCH_FLAGS -std=c++23 -stdlib=libc++"
           export LDFLAGS="$ARCH_FLAGS"
 
-          # 修改 Makefile 中的编译器
           sed -i '' 's/\bg++\b/clang++/g' Makefile
 
           make -j$(sysctl -n hw.logicalcpu)
