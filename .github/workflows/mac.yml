@@ -163,17 +163,22 @@ jobs:
           sed -i '' 's/\bg++\b/clang++/g' Makefile
           export MACOSX_DEPLOYMENT_TARGET=11.0
 
-          # 覆盖可能的构建目录变量
-          echo "=== Detecting build directory variables in Makefile ==="
-          grep -E '^(OBJDIR|BUILDDIR|OUTDIR|TMPDIR|WORKDIR)[[:space:]]*[:?]?=' Makefile || echo "No build dir variables found"
+          # 强制所有可能的临时目录变量指向当前目录下的子目录
+          export TMPDIR=$(pwd)/tmp_build
+          mkdir -p $TMPDIR obj
 
-          mkdir -p ./obj
-          for var in OBJDIR BUILDDIR OUTDIR TMPDIR WORKDIR; do
+          # 检测并覆盖所有可能的构建目录变量
+          for var in OBJDIR BUILDDIR OUTDIR TMPDIR WORKDIR TMP WORK BUILD_DIR; do
             if grep -q "^[[:space:]]*$var[[:space:]]*[:?]?=" Makefile; then
               echo "Overriding $var to ./obj"
               export $var="./obj"
             fi
           done
+
+          # 额外处理可能存在的环境变量
+          export OBJDIR="./obj"
+          export BUILDDIR="./obj"
+          export TMP="./obj"
 
           echo "=== Current directory ==="
           pwd
