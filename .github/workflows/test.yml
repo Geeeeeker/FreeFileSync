@@ -1,4 +1,4 @@
-name: Build FreeFileSync (Final Version with warn_static.h fix)
+name: Build FreeFileSync (Final Version with warn_static.h & C++23 fix)
 
 on:
   workflow_dispatch:
@@ -117,6 +117,22 @@ jobs:
           if [ -n "$DARKMODE_CPP" ]; then
             sed -i '63s/globalDefaultThemeIsDark = wxSystemSettings::GetAppearance().AreAppsDark();/globalDefaultThemeIsDark = false;/' "$DARKMODE_CPP"
             sed -i '96,99d' "$DARKMODE_CPP"
+          fi
+
+      - name: Enable C++23 for GCC
+        run: |
+          cd $REPO_ROOT/$BUILD_DIR
+          if [ -f Makefile ]; then
+            # 在 cxxFlags 中添加 -std=c++23（如果尚未存在）
+            if ! grep -q -- '-std=c++23' Makefile; then
+              sed -i '/^cxxFlags *=/ s/$/ -std=c++23/' Makefile
+              echo "Added -std=c++23 to Makefile"
+            else
+              echo "-std=c++23 already present"
+            fi
+          else
+            echo "Error: Makefile not found in $BUILD_DIR"
+            exit 1
           fi
 
       - name: Build FreeFileSync
