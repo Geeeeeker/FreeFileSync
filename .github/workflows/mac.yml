@@ -1,176 +1,58 @@
-name: Build FreeFileSync (Multi-arch)
+name: Build FreeFileSync (Multi-arch) and Release
 
 on:
-  workflow_dispatch:  # 手动触发，无需输入版本号
+  workflow_dispatch:  # 手动触发，无需输入参数
 
 jobs:
   build:
     name: Build for ${{ matrix.arch }}
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
         arch: [amd64, i386, arm64, arm]
         include:
           - arch: amd64
-            platform: native
-            binary_name: FreeFileSync_amd64
-            debian_arch: amd64
+            platform: linux/amd64
+            image: ubuntu:22.04
+            binary_suffix: amd64
           - arch: i386
-            platform: native
-            binary_name: FreeFileSync_i386
-            debian_arch: i386
+            platform: linux/386
+            image: i386/ubuntu:20.04   # Ubuntu 20.04 仍提供 i386 镜像
+            binary_suffix: i386
           - arch: arm64
-            platform: docker
-            docker_platform: linux/arm64
-            binary_name: FreeFileSync_aarch64
+            platform: linux/arm64
+            image: arm64v8/ubuntu:22.04
+            binary_suffix: aarch64
           - arch: arm
-            platform: docker
-            docker_platform: linux/arm/v7
-            binary_name: FreeFileSync_armhf
+            platform: linux/arm/v7
+            image: arm32v7/ubuntu:22.04
+            binary_suffix: armhf
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 对于 arm64/arm，需要 QEMU 支持
-      - name: Set up QEMU for Docker
-        if: matrix.platform == 'docker'
+      - name: Set up QEMU for ARM builds
+        if: matrix.arch == 'arm64' || matrix.arch == 'arm'
         uses: docker/setup-qemu-action@v3
         with:
-          platforms: ${{ matrix.docker_platform }}
+          platforms: ${{ matrix.platform }}
 
-      # ---------- 原生编译 (amd64 / i386) ----------
-      - name: Native build for ${{ matrix.arch }}
-        if: matrix.platform == 'native'
-        run: |
-          set -e
-          # 通用编译依赖
-          sudo apt update
-          sudo apt install -y wget unzip bzip2 make g++ pkg-config patch
-
-          if [ "${{ matrix.arch }}" = "i386" ]; then
-            # i386 需要 multilib 支持和 32 位库
-            sudo dpkg --add-architecture i386
-            sudo apt update
-            sudo apt install -y g++-multilib libgtk-3-dev:i386 libssl-dev:i386 libpsl-dev:i386 libidn2-dev:i386
-            # 设置编译参数
-            export CFLAGS="-m32"
-            export CXXFLAGS="-m32"
-            export LDFLAGS="-m32"
-            export PKG_CONFIG_LIBDIR="/usr/lib/i386-linux-gnu/pkgconfig"
-            HOST="--host=i686-linux-gnu"
-          else
-            # amd64
-            sudo apt install -y libgtk-3-dev libssl-dev libpsl-dev libidn2-dev
-            HOST=""
-          fi
-
-          # 编译 libssh2
-          wget https://libssh2.org/download/libssh2-1.11.1.tar.gz
-          tar xzf libssh2-1.11.1.tar.gz
-          cd libssh2-1.11.1
-          mkdir build && cd build
-          ../configure $HOST --prefix=/usr/local
-          make -j$(nproc)
-          sudo make install
-          sudo ldconfig
-          cd ../..
-
-          # 编译 curl
-          wget https://curl.se/download/curl-8.15.0.tar.gz
-          tar xzf curl-8.15.0.tar.gz
-          cd curl-8.15.0
-          mkdir build && cd build
-          ../configure $HOST --with-openssl --with-libssh2 --enable-versioned-symbols --prefix=/usr/local
-          make -j$(nproc)
-          sudo make install
-          sudo ldconfig
-          cd ../..
-
-          # 编译 wxWidgets
-          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.3.1/wxWidgets-3.3.1.tar.bz2
-          tar xjf wxWidgets-3.3.1.tar.bz2
-          cd wxWidgets-3.3.1
-          mkdir gtk-build && cd gtk-build
-          ../configure $HOST --disable-shared --prefix=/usr/local
-          make -j$(nproc)
-          sudo make install
-          cd ../..
-
-          # 下载 FreeFileSync 源码
-          wget https://freefilesync.org/download/FreeFileSync_14.4_Source.zip
-          unzip FreeFileSync_14.4_Source.zip
-
-          # 应用补丁（与原文档一致）
-          cd FreeFileSync/Source
-          sed -i '21i#define MAX_SFTP_OUTGOING_SIZE 30000\n#define MAX_SFTP_READ_SIZE 30000' afs/sftp.cpp
-          sed -i 's/`pkg-config --cflags gtk+-2.0`/`pkg-config --cflags gtk+-3.0`/' Makefile
-          sed -i 's/-isystem\/usr\/include\/gtk-2.0/-isystem\/usr\/include\/gtk-3.0/' Makefile
-          sed -i '243s/#error/#warning/' application.cpp
-          sed -i '63s/globalDefaultThemeIsDark = wxSystemSettings::GetAppearance().AreAppsDark();/globalDefaultThemeIsDark = false;/' ../wx+/darkmode.cpp
-          sed -i '96,99d' ../wx+/darkmode.cpp
-          sed -i '12i#include <wx/settings.h>' ../wx+/darkmode.h
-          sed -i '29r /dev/stdin' ../wx+/darkmode.h << 'EOF'
-          struct wxColorHook
-          {
-              virtual ~wxColorHook() {}
-              virtual wxColour getColor(wxSystemColour index) const = 0;
-          };
-          WXDLLIMPEXP_CORE inline std::unique_ptr<wxColorHook>& refGlobalColorHook()
-          {
-              static std::unique_ptr<wxColorHook> globalColorHook;
-              return globalColorHook;
-          }
-
-          class WXDLLIMPEXP_CORE wxSystemSettings2 : public wxSystemSettingsNative
-          {
-          public:
-              static wxColour GetColour(wxSystemColour index)
-              {
-                 if (refGlobalColorHook())
-                                  return refGlobalColorHook()->getColor(index);
-
-                 return wxSystemSettingsNative::GetColour(index);
-              }
-          };
-          EOF
-
-          # 编译
-          make -j$(nproc)
-
-          # 复制二进制并重命名
-          cd ../../Build/Bin
-          if [ -f FreeFileSync_aarch64 ]; then
-            cp FreeFileSync_aarch64 ${{ matrix.binary_name }}
-          elif [ -f FreeFileSync_armhf ]; then
-            cp FreeFileSync_armhf ${{ matrix.binary_name }}
-          elif [ -f FreeFileSync_i386 ]; then
-            cp FreeFileSync_i386 ${{ matrix.binary_name }}
-          elif [ -f FreeFileSync_amd64 ]; then
-            cp FreeFileSync_amd64 ${{ matrix.binary_name }}
-          else
-            # 尝试通用匹配
-            cp FreeFileSync* ${{ matrix.binary_name }}
-          fi
-          chmod +x ${{ matrix.binary_name }}
-
-      # ---------- Docker 仿真编译 (arm64 / arm) ----------
-      - name: Docker build for ${{ matrix.arch }}
-        if: matrix.platform == 'docker'
+      - name: Build in container
         run: |
           docker run --rm \
-            --platform ${{ matrix.docker_platform }} \
+            --platform ${{ matrix.platform }} \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
-            ubuntu:24.04 \
+            ${{ matrix.image }} \
             bash -c "
             set -e
+            # 安装编译工具和依赖
             apt update && apt install -y \
               wget unzip bzip2 make g++ pkg-config \
               libgtk-3-dev libssl-dev libpsl-dev libidn2-dev patch
 
-            # libssh2
+            # 编译 libssh2
             wget https://libssh2.org/download/libssh2-1.11.1.tar.gz
             tar xzf libssh2-1.11.1.tar.gz
             cd libssh2-1.11.1
@@ -182,7 +64,7 @@ jobs:
             ldconfig
             cd ../..
 
-            # curl
+            # 编译 libcurl
             wget https://curl.se/download/curl-8.15.0.tar.gz
             tar xzf curl-8.15.0.tar.gz
             cd curl-8.15.0
@@ -194,7 +76,7 @@ jobs:
             ldconfig
             cd ../..
 
-            # wxWidgets
+            # 编译 wxWidgets
             wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.3.1/wxWidgets-3.3.1.tar.bz2
             tar xjf wxWidgets-3.3.1.tar.bz2
             cd wxWidgets-3.3.1
@@ -204,18 +86,28 @@ jobs:
             make install
             cd ../..
 
-            # FreeFileSync
+            # 下载 FreeFileSync 源码
             wget https://freefilesync.org/download/FreeFileSync_14.4_Source.zip
             unzip FreeFileSync_14.4_Source.zip
+
+            # 应用补丁（参照原文档）
             cd FreeFileSync/Source
 
-            # 补丁（同上）
+            # 4.1 sftp.cpp
             sed -i '21i#define MAX_SFTP_OUTGOING_SIZE 30000\n#define MAX_SFTP_READ_SIZE 30000' afs/sftp.cpp
+
+            # 4.2 Makefile (GTK2 → GTK3)
             sed -i 's/`pkg-config --cflags gtk+-2.0`/`pkg-config --cflags gtk+-3.0`/' Makefile
             sed -i 's/-isystem\/usr\/include\/gtk-2.0/-isystem\/usr\/include\/gtk-3.0/' Makefile
+
+            # 4.3 application.cpp (#error → #warning)
             sed -i '243s/#error/#warning/' application.cpp
+
+            # 4.4 darkmode.cpp
             sed -i '63s/globalDefaultThemeIsDark = wxSystemSettings::GetAppearance().AreAppsDark();/globalDefaultThemeIsDark = false;/' ../wx+/darkmode.cpp
             sed -i '96,99d' ../wx+/darkmode.cpp
+
+            # 4.5 darkmode.h
             sed -i '12i#include <wx/settings.h>' ../wx+/darkmode.h
             sed -i '29r /dev/stdin' ../wx+/darkmode.h << 'EOF'
             struct wxColorHook
@@ -242,29 +134,28 @@ jobs:
             };
             EOF
 
+            # 4.6 gdrive.cpp (可选，留空)
+
+            # 编译
             make -j\$(nproc)
+
+            # 复制二进制到固定位置并重命名
             cd ../../Build/Bin
-            if [ -f FreeFileSync_aarch64 ]; then
-              cp FreeFileSync_aarch64 ${{ matrix.binary_name }}
-            elif [ -f FreeFileSync_armhf ]; then
-              cp FreeFileSync_armhf ${{ matrix.binary_name }}
-            else
-              cp FreeFileSync* ${{ matrix.binary_name }}
-            fi
-            chmod +x ${{ matrix.binary_name }}
+            BIN_NAME=\"FreeFileSync_${{ matrix.binary_suffix }}\"
+            # 找到生成的可执行文件（通常以 FreeFileSync_ 开头）
+            cp FreeFileSync_* \$BIN_NAME
+            chmod +x \$BIN_NAME
             "
 
-      # 上传每个架构的二进制作为 artifact
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.binary_name }}
-          path: ${{ github.workspace }}/FreeFileSync/Build/Bin/${{ matrix.binary_name }}
+          name: FreeFileSync_${{ matrix.arch }}
+          path: ${{ github.workspace }}/FreeFileSync/Build/Bin/FreeFileSync_${{ matrix.binary_suffix }}
           if-no-files-found: error
 
-  # 合并所有 artifact 并发布 Release
   release:
-    name: Create Release and Package
+    name: Create Release
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -275,26 +166,28 @@ jobs:
         with:
           path: artifacts
 
-      - name: Prepare archive
+      - name: Determine version
+        id: version
+        run: |
+          FFS_VERSION="14.4"
+          DATE_TAG=$(date +'%Y%m%d')
+          echo "VERSION=${FFS_VERSION}-${DATE_TAG}" >> $GITHUB_OUTPUT
+          echo "RELEASE_NAME=FreeFileSync ${FFS_VERSION} (${DATE_TAG})" >> $GITHUB_OUTPUT
+
+      - name: Prepare multi-arch archive
         run: |
           mkdir -p release
-          cp artifacts/FreeFileSync_amd64/FreeFileSync_amd64 release/
-          cp artifacts/FreeFileSync_i386/FreeFileSync_i386 release/
-          cp artifacts/FreeFileSync_aarch64/FreeFileSync_aarch64 release/
-          cp artifacts/FreeFileSync_armhf/FreeFileSync_armhf release/
+          # 将所有二进制复制到 release 目录
+          find artifacts -type f -name "FreeFileSync_*" -exec cp {} release/ \;
           cd release
-          # 生成版本号：FreeFileSync 14.4 + 构建编号
-          VERSION="14.4_build_${{ github.run_number }}"
-          zip -9 "../FreeFileSync_${VERSION}_multiarch.zip" ./*
+          zip -9 ../FreeFileSync_${{ steps.version.outputs.VERSION }}_multiarch.zip ./*
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ env.VERSION }}
-          name: FreeFileSync 14.4 (Build ${{ github.run_number }})
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: ${{ steps.version.outputs.RELEASE_NAME }}
           draft: false
           prerelease: false
-          files: FreeFileSync_*.zip
+          files: FreeFileSync_${{ steps.version.outputs.VERSION }}_multiarch.zip
           generate_release_notes: true
-        env:
-          VERSION: 14.4_build_${{ github.run_number }}
