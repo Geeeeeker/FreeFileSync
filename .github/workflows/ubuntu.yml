@@ -1,199 +1,217 @@
-name: Build FreeFileSync and Release
+name: Build FreeFileSync (Cross-Compile for ARM)
 
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Release tag (e.g. v14.4)'
+      arch:
+        description: 'Target architecture'
         required: true
-        default: 'v14.4'
+        default: 'arm64'
+        type: choice
+        options:
+          - arm64
+          - arm
 
 jobs:
   build:
-    name: Build for ${{ matrix.arch }}
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        arch: [amd64, arm64, arm, i386]
-        include:
-          - arch: amd64
-            platform: linux/amd64
-            binary_suffix: amd64
-          - arch: arm64
-            platform: linux/arm64
-            binary_suffix: aarch64
-          - arch: arm
-            platform: linux/arm/v7
-            binary_suffix: armhf
-          - arch: i386
-            platform: linux/386
-            binary_suffix: i386
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up multi-architecture emulation
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: ${{ matrix.platform }}
-
-      - name: Build in container
-        run: |
-          docker run --rm \
-            --platform ${{ matrix.platform }} \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            ubuntu:24.04 \
-            bash -c "
-            set -e
-            # 安装编译工具和依赖
-            apt update && apt install -y \
-              wget unzip bzip2 make g++ pkg-config \
-              libgtk-3-dev libssl-dev libpsl-dev libidn2-dev patch
-
-            # 编译 libssh2
-            wget https://libssh2.org/download/libssh2-1.11.1.tar.gz
-            tar xzf libssh2-1.11.1.tar.gz
-            cd libssh2-1.11.1
-            mkdir build && cd build
-            ../configure
-            make -j\$(nproc)
-            make install
-            cp /usr/local/lib/libssh2.so.1.0.1 /usr/lib/\$(gcc -dumpmachine)/ 2>/dev/null || true
-            ldconfig
-            cd ../..
-
-            # 编译 libcurl
-            wget https://curl.se/download/curl-8.15.0.tar.gz
-            tar xzf curl-8.15.0.tar.gz
-            cd curl-8.15.0
-            mkdir build && cd build
-            ../configure --with-openssl --with-libssh2 --enable-versioned-symbols
-            make -j\$(nproc)
-            make install
-            cp /usr/local/lib/libcurl.so.4.8.0 /usr/lib/\$(gcc -dumpmachine)/ 2>/dev/null || true
-            ldconfig
-            cd ../..
-
-            # 编译 wxWidgets
-            wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.3.1/wxWidgets-3.3.1.tar.bz2
-            tar xjf wxWidgets-3.3.1.tar.bz2
-            cd wxWidgets-3.3.1
-            mkdir gtk-build && cd gtk-build
-            ../configure --disable-shared
-            make -j\$(nproc)
-            make install
-            cd ../..
-
-            # 下载 FreeFileSync 源码
-            wget https://freefilesync.org/download/FreeFileSync_14.4_Source.zip
-            unzip FreeFileSync_14.4_Source.zip
-
-            # 应用补丁 (参照原文档)
-            cd FreeFileSync/Source
-
-            # 4.1 sftp.cpp
-            sed -i '21i#define MAX_SFTP_OUTGOING_SIZE 30000\n#define MAX_SFTP_READ_SIZE 30000' afs/sftp.cpp
-
-            # 4.2 Makefile (GTK2 → GTK3)
-            sed -i 's/`pkg-config --cflags gtk+-2.0`/`pkg-config --cflags gtk+-3.0`/' Makefile
-            sed -i 's/-isystem\/usr\/include\/gtk-2.0/-isystem\/usr\/include\/gtk-3.0/' Makefile
-
-            # 4.3 application.cpp (#error → #warning)
-            sed -i '243s/#error/#warning/' application.cpp
-
-            # 4.4 darkmode.cpp
-            sed -i '63s/globalDefaultThemeIsDark = wxSystemSettings::GetAppearance().AreAppsDark();/globalDefaultThemeIsDark = false;/' ../wx+/darkmode.cpp
-            sed -i '96,99d' ../wx+/darkmode.cpp
-
-            # 4.5 darkmode.h
-            sed -i '12i#include <wx/settings.h>' ../wx+/darkmode.h
-            sed -i '29r /dev/stdin' ../wx+/darkmode.h << 'EOF'
-            struct wxColorHook
-            {
-                virtual ~wxColorHook() {}
-                virtual wxColour getColor(wxSystemColour index) const = 0;
-            };
-            WXDLLIMPEXP_CORE inline std::unique_ptr<wxColorHook>& refGlobalColorHook()
-            {
-                static std::unique_ptr<wxColorHook> globalColorHook;
-                return globalColorHook;
-            }
-
-            class WXDLLIMPEXP_CORE wxSystemSettings2 : public wxSystemSettingsNative
-            {
-            public:
-                static wxColour GetColour(wxSystemColour index)
-                {
-                   if (refGlobalColorHook())
-                                    return refGlobalColorHook()->getColor(index);
-
-                   return wxSystemSettingsNative::GetColour(index);
-                }
-            };
-            EOF
-
-            # 4.6 gdrive.cpp (可选，留空)
-            # 如需 Google Drive 支持，在此填入有效凭据
-
-            # 编译
-            make -j\$(nproc)
-
-            # 将二进制复制到固定位置
-            cd ../../Build/Bin
-            BIN_NAME=\"FreeFileSync_${{ matrix.binary_suffix }}\"
-            if [ -f FreeFileSync_aarch64 ]; then
-                cp FreeFileSync_aarch64 \$BIN_NAME
-            elif [ -f FreeFileSync_armhf ]; then
-                cp FreeFileSync_armhf \$BIN_NAME
-            elif [ -f FreeFileSync_i386 ]; then
-                cp FreeFileSync_i386 \$BIN_NAME
-            elif [ -f FreeFileSync_amd64 ]; then
-                cp FreeFileSync_amd64 \$BIN_NAME
-            else
-                # 如果没有预期名称，直接复制所有
-                cp FreeFileSync* \$BIN_NAME
-            fi
-            # 确保二进制有执行权限
-            chmod +x \$BIN_NAME
-            "
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeFileSync_${{ matrix.arch }}
-          path: ${{ github.workspace }}/FreeFileSync/Build/Bin/FreeFileSync_${{ matrix.binary_suffix }}
-          if-no-files-found: error
-
-  release:
-    name: Create Release and Upload Assets
-    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Prepare archive
+      # 根据选择的架构设置交叉编译变量
+      - name: Set architecture variables
+        id: vars
         run: |
-          mkdir -p release
-          cp artifacts/FreeFileSync_amd64/FreeFileSync_amd64 release/
-          cp artifacts/FreeFileSync_arm64/FreeFileSync_aarch64 release/
-          cp artifacts/FreeFileSync_arm/FreeFileSync_armhf release/
-          cp artifacts/FreeFileSync_i386/FreeFileSync_i386 release/
-          cd release
-          zip -9 ../FreeFileSync_${{ github.event.inputs.tag }}_multiarch.zip ./*
+          case "${{ github.event.inputs.arch }}" in
+            arm64)
+              echo "ARCH=arm64" >> $GITHUB_OUTPUT
+              echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_OUTPUT
+              echo "HOST=aarch64-linux-gnu" >> $GITHUB_OUTPUT
+              echo "MULTIARCH=aarch64-linux-gnu" >> $GITHUB_OUTPUT
+              echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_OUTPUT
+              echo "DEB_ARCH=arm64" >> $GITHUB_OUTPUT
+              ;;
+            arm)
+              echo "ARCH=arm" >> $GITHUB_OUTPUT
+              echo "CROSS_COMPILE=arm-linux-gnueabihf-" >> $GITHUB_OUTPUT
+              echo "HOST=arm-linux-gnueabihf" >> $GITHUB_OUTPUT
+              echo "MULTIARCH=arm-linux-gnueabihf" >> $GITHUB_OUTPUT
+              echo "PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig" >> $GITHUB_OUTPUT
+              echo "DEB_ARCH=armhf" >> $GITHUB_OUTPUT
+              ;;
+          esac
 
+      # 添加目标架构并安装交叉编译工具链
+      - name: Enable multiarch and install cross toolchain
+        run: |
+          sudo dpkg --add-architecture ${{ steps.vars.outputs.DEB_ARCH }}
+          sudo apt update
+          sudo apt install -y crossbuild-essential-${{ steps.vars.outputs.DEB_ARCH }} \
+            wget unzip bzip2 make pkg-config patch
+
+      # 安装目标架构的系统库（GTK3、OpenSSL 等）
+      - name: Install target libraries
+        run: |
+          sudo apt install -y \
+            libgtk-3-dev:${{ steps.vars.outputs.DEB_ARCH }} \
+            libssl-dev:${{ steps.vars.outputs.DEB_ARCH }} \
+            libpsl-dev:${{ steps.vars.outputs.DEB_ARCH }} \
+            libidn2-dev:${{ steps.vars.outputs.DEB_ARCH }}
+
+      # 创建安装前缀，用于存放交叉编译的依赖库
+      - name: Create installation prefix
+        run: mkdir -p $HOME/install/${{ steps.vars.outputs.HOST }}
+
+      # 交叉编译 libssh2
+      - name: Build libssh2
+        run: |
+          wget https://libssh2.org/download/libssh2-1.11.1.tar.gz
+          tar xzf libssh2-1.11.1.tar.gz
+          cd libssh2-1.11.1
+          mkdir build && cd build
+          ../configure --host=${{ steps.vars.outputs.HOST }} \
+            --prefix=$HOME/install/${{ steps.vars.outputs.HOST }} \
+            CC=${{ steps.vars.outputs.CROSS_COMPILE }}gcc \
+            CXX=${{ steps.vars.outputs.CROSS_COMPILE }}g++ \
+            PKG_CONFIG_PATH=${{ steps.vars.outputs.PKG_CONFIG_PATH }}
+          make -j$(nproc)
+          make install
+          cd ../..
+
+      # 交叉编译 libcurl（需要找到 libssh2 和 OpenSSL）
+      - name: Build libcurl
+        run: |
+          export PKG_CONFIG_PATH=$HOME/install/${{ steps.vars.outputs.HOST }}/lib/pkgconfig:${{ steps.vars.outputs.PKG_CONFIG_PATH }}
+          wget https://curl.se/download/curl-8.15.0.tar.gz
+          tar xzf curl-8.15.0.tar.gz
+          cd curl-8.15.0
+          mkdir build && cd build
+          ../configure --host=${{ steps.vars.outputs.HOST }} \
+            --prefix=$HOME/install/${{ steps.vars.outputs.HOST }} \
+            --with-openssl \
+            CC=${{ steps.vars.outputs.CROSS_COMPILE }}gcc \
+            CXX=${{ steps.vars.outputs.CROSS_COMPILE }}g++ \
+            PKG_CONFIG_PATH=$PKG_CONFIG_PATH
+          make -j$(nproc)
+          make install
+          cd ../..
+
+      # 交叉编译 wxWidgets（静态库）
+      - name: Build wxWidgets
+        run: |
+          export PKG_CONFIG_PATH=$HOME/install/${{ steps.vars.outputs.HOST }}/lib/pkgconfig:${{ steps.vars.outputs.PKG_CONFIG_PATH }}
+          wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.3.1/wxWidgets-3.3.1.tar.bz2
+          tar xjf wxWidgets-3.3.1.tar.bz2
+          cd wxWidgets-3.3.1
+          mkdir gtk-build && cd gtk-build
+          ../configure --host=${{ steps.vars.outputs.HOST }} \
+            --prefix=$HOME/install/${{ steps.vars.outputs.HOST }} \
+            --disable-shared \
+            CC=${{ steps.vars.outputs.CROSS_COMPILE }}gcc \
+            CXX=${{ steps.vars.outputs.CROSS_COMPILE }}g++ \
+            PKG_CONFIG_PATH=$PKG_CONFIG_PATH
+          make -j$(nproc)
+          make install
+          cd ../..
+
+      # 下载 FreeFileSync 源码（已修正为 GitHub raw 链接）
+      - name: Download FreeFileSync source
+        run: |
+          wget https://github.com/Geeeeeker/FreeFileSync/raw/master/FreeFileSync/FreeFileSync_14.4_Source.zip
+          unzip FreeFileSync_14.4_Source.zip
+
+      # 应用原文档中的所有补丁
+      - name: Apply patches
+        run: |
+          cd FreeFileSync/Source
+          # 4.1 sftp.cpp
+          sed -i '21i#define MAX_SFTP_OUTGOING_SIZE 30000\n#define MAX_SFTP_READ_SIZE 30000' afs/sftp.cpp
+          # 4.2 Makefile (GTK2 → GTK3)
+          sed -i 's/`pkg-config --cflags gtk+-2.0`/`pkg-config --cflags gtk+-3.0`/' Makefile
+          sed -i 's/-isystem\/usr\/include\/gtk-2.0/-isystem\/usr\/include\/gtk-3.0/' Makefile
+          # 4.3 application.cpp
+          sed -i '243s/#error/#warning/' application.cpp
+          # 4.4 darkmode.cpp
+          sed -i '63s/globalDefaultThemeIsDark = wxSystemSettings::GetAppearance().AreAppsDark();/globalDefaultThemeIsDark = false;/' ../wx+/darkmode.cpp
+          sed -i '96,99d' ../wx+/darkmode.cpp
+          # 4.5 darkmode.h
+          sed -i '12i#include <wx/settings.h>' ../wx+/darkmode.h
+          sed -i '29r /dev/stdin' ../wx+/darkmode.h << 'EOL'
+          struct wxColorHook
+          {
+              virtual ~wxColorHook() {}
+              virtual wxColour getColor(wxSystemColour index) const = 0;
+          };
+          WXDLLIMPEXP_CORE inline std::unique_ptr<wxColorHook>& refGlobalColorHook()
+          {
+              static std::unique_ptr<wxColorHook> globalColorHook;
+              return globalColorHook;
+          }
+
+          class WXDLLIMPEXP_CORE wxSystemSettings2 : public wxSystemSettingsNative
+          {
+          public:
+              static wxColour GetColour(wxSystemColour index)
+              {
+                 if (refGlobalColorHook())
+                                  return refGlobalColorHook()->getColor(index);
+
+                 return wxSystemSettingsNative::GetColour(index);
+              }
+          };
+          EOL
+
+      # 交叉编译 FreeFileSync 本体
+      - name: Build FreeFileSync
+        run: |
+          cd FreeFileSync/Source
+          export PKG_CONFIG_PATH=$HOME/install/${{ steps.vars.outputs.HOST }}/lib/pkgconfig:${{ steps.vars.outputs.PKG_CONFIG_PATH }}
+          export CFLAGS="-I$HOME/install/${{ steps.vars.outputs.HOST }}/include"
+          export CXXFLAGS="-I$HOME/install/${{ steps.vars.outputs.HOST }}/include"
+          export LDFLAGS="-L$HOME/install/${{ steps.vars.outputs.HOST }}/lib -Wl,-rpath-link,$HOME/install/${{ steps.vars.outputs.HOST }}/lib"
+          export CC=${{ steps.vars.outputs.CROSS_COMPILE }}gcc
+          export CXX=${{ steps.vars.outputs.CROSS_COMPILE }}g++
+          make -j$(nproc)
+
+      # 定位生成的二进制并打包
+      - name: Locate binary and prepare archive
+        run: |
+          cd FreeFileSync/Build/Bin
+          if [ -f FreeFileSync_aarch64 ]; then
+            BIN=FreeFileSync_aarch64
+          elif [ -f FreeFileSync_armhf ]; then
+            BIN=FreeFileSync_armhf
+          else
+            echo "Binary not found"
+            exit 1
+          fi
+          cp $BIN FreeFileSync_${{ github.event.inputs.arch }}
+          mkdir -p ${{ github.workspace }}/output
+          cp FreeFileSync_${{ github.event.inputs.arch }} ${{ github.workspace }}/output/
+          cd ${{ github.workspace }}/output
+          zip FreeFileSync_${{ github.event.inputs.arch }}.zip FreeFileSync_${{ github.event.inputs.arch }}
+
+      # 上传构建产物（Artifact）
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeFileSync_${{ github.event.inputs.arch }}
+          path: output/FreeFileSync_${{ github.event.inputs.arch }}.zip
+
+      # 创建预发布版本并上传 ZIP
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag }}
-          name: FreeFileSync ${{ github.event.inputs.tag }}
+          tag_name: build-${{ github.run_id }}-${{ github.event.inputs.arch }}
+          name: FreeFileSync ${{ github.event.inputs.arch }} (build #${{ github.run_number }})
+          body: |
+            **Architecture**: ${{ github.event.inputs.arch }}
+            **Commit**: ${{ github.sha }}
+            **Run ID**: ${{ github.run_id }}
+            **Build Date**: ${{ github.event.repository.updated_at }}
           draft: false
-          prerelease: false
-          files: FreeFileSync_${{ github.event.inputs.tag }}_multiarch.zip
-          generate_release_notes: true
+          prerelease: true
+          files: output/FreeFileSync_${{ github.event.inputs.arch }}.zip
