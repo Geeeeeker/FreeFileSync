@@ -23,14 +23,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 创建统一的构建脚本（包含所有编译步骤和补丁）
       - name: Create build script
         run: |
           cat > build.sh << 'EOF'
           #!/bin/bash
           set -e
 
-          # 智能安装依赖（容器内无 sudo，直接运行；主机上有 sudo 则使用）
           if command -v sudo &> /dev/null; then
               SUDO=sudo
           else
@@ -74,8 +72,8 @@ jobs:
           $SUDO make install
           cd ../..
 
-          # 下载 FreeFileSync 源码
-          wget https://freefilesync.org/download/FreeFileSync_14.4_Source.zip
+          # 下载 FreeFileSync 源码（使用 GitHub raw 链接）
+          wget https://github.com/Geeeeeker/FreeFileSync/raw/master/FreeFileSync/FreeFileSync_14.4_Source.zip
           unzip FreeFileSync_14.4_Source.zip
 
           # 应用补丁
@@ -123,15 +121,12 @@ jobs:
           EOL
 
           # 4.6 gdrive.cpp (可选，留空)
-          # 如需 Google Drive 支持，请在此填入凭据
 
           # 编译
           make -j$(nproc)
 
-          # 定位生成的二进制文件
+          # 定位二进制
           cd ../../Build/Bin
-          echo "Binary directory: $(pwd)"
-          ls -la
           if [ -f FreeFileSync_aarch64 ]; then
               BIN_SRC="FreeFileSync_aarch64"
           elif [ -f FreeFileSync_armhf ]; then
@@ -144,22 +139,18 @@ jobs:
               echo "Could not find FreeFileSync binary"
               exit 1
           fi
-          # 复制到工作区根目录，方便后续步骤使用
           cp "$BIN_SRC" /workspace/FreeFileSync_binary
           EOF
           chmod +x build.sh
 
-      # 对于非 amd64 架构，启用 QEMU 模拟
       - name: Set up QEMU
         if: github.event.inputs.arch != 'amd64'
         uses: docker/setup-qemu-action@v3
 
-      # amd64：主机原生编译
       - name: Build for amd64 (native)
         if: github.event.inputs.arch == 'amd64'
         run: ./build.sh
 
-      # 其他架构：通过 Docker 容器编译
       - name: Build for ${{ github.event.inputs.arch }} (via Docker)
         if: github.event.inputs.arch != 'amd64'
         run: |
@@ -175,7 +166,6 @@ jobs:
             ubuntu:24.04 \
             bash -c "./build.sh"
 
-      # 打包二进制为 ZIP
       - name: Prepare ZIP archive
         run: |
           mkdir -p output
@@ -183,14 +173,12 @@ jobs:
           cd output
           zip ../FreeFileSync_${{ github.event.inputs.arch }}.zip FreeFileSync_${{ github.event.inputs.arch }}
 
-      # 上传 artifact 作为备份
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: FreeFileSync_${{ github.event.inputs.arch }}
           path: FreeFileSync_${{ github.event.inputs.arch }}.zip
 
-      # 创建 GitHub Release 并上传 ZIP
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
