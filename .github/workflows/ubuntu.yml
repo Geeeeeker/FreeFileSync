@@ -1,4 +1,4 @@
-name: Build FreeFileSync
+name: Build FreeFileSync and Release
 
 on:
   workflow_dispatch:
@@ -13,6 +13,18 @@ on:
         required: true
         default: 'x64'
         type: string
+      release_tag:
+        description: 'Release tag (e.g., v14.4.0). Leave empty to auto-generate.'
+        required: false
+        type: string
+      release_name:
+        description: 'Release name (e.g., "FreeFileSync 14.4.0"). Leave empty to use tag.'
+        required: false
+        type: string
+
+# 需要写入权限以创建 Release
+permissions:
+  contents: write
 
 jobs:
   setup:
@@ -220,3 +232,78 @@ jobs:
         with:
           name: FreeFileSync-${{ matrix.platform }}-${{ matrix.arch }}
           path: artifacts/
+
+  # 新增：收集所有构建产物，打包成一个压缩包
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded-artifacts
+
+      - name: Prepare release directory structure
+        run: |
+          mkdir -p release/FreeFileSync
+          # 遍历下载的每个 Artifact 文件夹，将文件复制到以平台架构命名的子目录中
+          for artifact_dir in downloaded-artifacts/FreeFileSync-*; do
+            if [ -d "$artifact_dir" ]; then
+              # 提取平台架构部分，例如 FreeFileSync-linux-x64 -> linux-x64
+              name=$(basename "$artifact_dir")
+              suffix=${name#FreeFileSync-}   # 得到 linux-x64 或 windows-x64
+              target_dir="release/FreeFileSync/$suffix"
+              mkdir -p "$target_dir"
+              cp -v "$artifact_dir"/* "$target_dir/"
+            fi
+          done
+
+      - name: Create archive
+        run: |
+          cd release
+          # 确定版本标签
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            TAG="${{ inputs.release_tag }}"
+          else
+            # 生成基于时间的标签，例如 v20250316-123456
+            TAG="v$(date +'%Y%m%d-%H%M%S')"
+          fi
+          ARCHIVE_NAME="FreeFileSync-${TAG}.zip"
+          zip -r "../${ARCHIVE_NAME}" FreeFileSync/
+          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
+          echo "TAG=${TAG}" >> $GITHUB_ENV
+
+      - name: Upload archive as artifact (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeFileSync-bundled
+          path: ${{ env.ARCHIVE_NAME }}
+
+    outputs:
+      tag: ${{ env.TAG }}
+      archive_name: ${{ env.ARCHIVE_NAME }}
+
+  # 新增：创建 GitHub Release 并上传压缩包
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download archive
+        uses: actions/download-artifact@v4
+        with:
+          name: FreeFileSync-bundled
+          path: .
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.package.outputs.tag }}
+          name: ${{ inputs.release_name || needs.package.outputs.tag }}
+          body: |
+            Automated build of FreeFileSync for platforms: ${{ inputs.platforms }}
+            Architectures: ${{ inputs.architectures }}
+          files: ${{ needs.package.outputs.archive_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
