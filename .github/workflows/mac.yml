@@ -79,7 +79,8 @@ jobs:
           $SUDO make install
           cd ../..
 
-          # 克隆 FreeFileSync 源码（使用您提供的仓库和分支）
+          # 清理旧目录，克隆 FreeFileSync 源码（使用您提供的仓库和分支）
+          rm -rf FreeFileSync
           git clone --branch version14 https://github.com/Geeeeeker/FreeFileSync.git
           cd FreeFileSync
 
@@ -96,7 +97,7 @@ jobs:
           # 4.3 application.cpp (#error → #warning)
           sed -i '243s/#error/#warning/' application.cpp
 
-          # 4.4 darkmode.cpp - 注意路径为 ../wx+/darkmode.cpp
+          # 4.4 darkmode.cpp
           if [ ! -f ../wx+/darkmode.cpp ]; then
               echo "Error: ../wx+/darkmode.cpp not found"
               exit 1
