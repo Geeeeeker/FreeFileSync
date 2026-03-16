@@ -45,7 +45,10 @@ jobs:
             ubuntu:24.04 \
             bash -c "
             set -e
-            apt update && apt install -y wget unzip make g++ pkg-config libgtk-3-dev libssl-dev libpsl-dev libidn2-dev patch
+            # 安装必要工具和依赖（增加 bzip2 以解压 .tar.bz2）
+            apt update && apt install -y \
+              wget unzip bzip2 make g++ pkg-config \
+              libgtk-3-dev libssl-dev libpsl-dev libidn2-dev patch
 
             # 下载并编译 libssh2
             wget https://libssh2.org/download/libssh2-1.11.1.tar.gz
@@ -55,7 +58,6 @@ jobs:
             ../configure
             make -j\$(nproc)
             make install
-            # 复制库（按文档步骤）
             cp /usr/local/lib/libssh2.so.1.0.1 /usr/lib/$(gcc -dumpmachine)/ 2>/dev/null || true
             ldconfig
             cd ../..
@@ -72,9 +74,9 @@ jobs:
             ldconfig
             cd ../..
 
-            # 下载并编译 wxWidgets
+            # 下载并编译 wxWidgets（需要 bzip2）
             wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.3.1/wxWidgets-3.3.1.tar.bz2
-            tar xjf wxWidgets-3.3.1.tar.bz2
+            tar xjf wxWidgets-3.3.1.tar.bz2   # 注意使用 xjf 表示 bzip2 解压
             cd wxWidgets-3.3.1
             mkdir gtk-build && cd gtk-build
             ../configure --disable-shared
@@ -104,9 +106,7 @@ jobs:
             sed -i '96,99d' ../wx+/darkmode.cpp
 
             # 4.5 darkmode.h
-            # 添加头文件包含
             sed -i '12i#include <wx/settings.h>' ../wx+/darkmode.h
-            # 在29行后插入新内容（使用 heredoc 配合 sed）
             sed -i '29r /dev/stdin' ../wx+/darkmode.h << 'EOF'
             struct wxColorHook
             {
