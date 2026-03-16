@@ -28,8 +28,6 @@ jobs:
           cat > build.sh << 'EOF'
           #!/bin/bash
           set -e
-
-          # 非交互式前端
           export DEBIAN_FRONTEND=noninteractive
 
           if command -v sudo &> /dev/null; then
@@ -45,7 +43,7 @@ jobs:
           fi
 
           $SUDO apt update
-          $SUDO apt install -y wget unzip bzip2 make g++ pkg-config libgtk-3-dev libssl-dev libpsl-dev libidn2-dev patch
+          $SUDO apt install -y wget unzip bzip2 make g++ pkg-config libgtk-3-dev libssl-dev libpsl-dev libidn2-dev patch git
 
           # 构建 libssh2
           wget -q https://libssh2.org/download/libssh2-1.11.1.tar.gz
@@ -81,13 +79,12 @@ jobs:
           $SUDO make install
           cd ../..
 
-          # 下载 FreeFileSync 源码（GitHub raw 链接）
-          wget -q https://github.com/Geeeeeker/FreeFileSync/raw/master/FreeFileSync/FreeFileSync_14.4_Source.zip
-          # 强制覆盖解压（避免交互）
-          unzip -o FreeFileSync_14.4_Source.zip
+          # 克隆 FreeFileSync 源码（使用您提供的仓库和分支）
+          git clone --branch version14 https://github.com/Geeeeeker/FreeFileSync.git
+          cd FreeFileSync
 
           # 应用补丁
-          cd FreeFileSync/Source
+          cd Source
 
           # 4.1 sftp.cpp
           sed -i '21i#define MAX_SFTP_OUTGOING_SIZE 30000\n#define MAX_SFTP_READ_SIZE 30000' afs/sftp.cpp
@@ -99,7 +96,11 @@ jobs:
           # 4.3 application.cpp (#error → #warning)
           sed -i '243s/#error/#warning/' application.cpp
 
-          # 4.4 darkmode.cpp
+          # 4.4 darkmode.cpp - 注意路径为 ../wx+/darkmode.cpp
+          if [ ! -f ../wx+/darkmode.cpp ]; then
+              echo "Error: ../wx+/darkmode.cpp not found"
+              exit 1
+          fi
           sed -i '63s/globalDefaultThemeIsDark = wxSystemSettings::GetAppearance().AreAppsDark();/globalDefaultThemeIsDark = false;/' ../wx+/darkmode.cpp
           sed -i '96,99d' ../wx+/darkmode.cpp
 
