@@ -45,12 +45,19 @@ jobs:
           esac
 
       # 添加目标架构并安装交叉编译工具链
-      - name: Enable multiarch and install cross toolchain
-        run: |
-          sudo dpkg --add-architecture ${{ steps.vars.outputs.DEB_ARCH }}
-          sudo apt update
-          sudo apt install -y crossbuild-essential-${{ steps.vars.outputs.DEB_ARCH }} \
-            wget unzip bzip2 make pkg-config patch
+- name: Enable multiarch and install cross toolchain
+  run: |
+    sudo dpkg --add-architecture ${{ steps.vars.outputs.DEB_ARCH }}
+    # 为 arm64/armhf 添加正确的源（ports.ubuntu.com）
+    sudo tee /etc/apt/sources.list.d/ports.list > /dev/null <<EOF
+    deb [arch=${{ steps.vars.outputs.DEB_ARCH }}] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
+    deb [arch=${{ steps.vars.outputs.DEB_ARCH }}] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
+    deb [arch=${{ steps.vars.outputs.DEB_ARCH }}] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
+    deb [arch=${{ steps.vars.outputs.DEB_ARCH }}] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
+    EOF
+    sudo apt update
+    sudo apt install -y crossbuild-essential-${{ steps.vars.outputs.DEB_ARCH }} \
+      wget unzip bzip2 make pkg-config patch
 
       # 安装目标架构的系统库（GTK3、OpenSSL 等）
       - name: Install target libraries
