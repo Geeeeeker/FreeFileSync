@@ -79,35 +79,62 @@ jobs:
           $SUDO make install
           cd ../..
 
-          # 清理旧目录，克隆 FreeFileSync 源码（使用您提供的仓库和分支）
+          # 清理并克隆 FreeFileSync 源码（使用 version14 分支）
           rm -rf FreeFileSync
           git clone --branch version14 https://github.com/Geeeeeker/FreeFileSync.git
           cd FreeFileSync
+          REPO_ROOT=$(pwd)
 
-          # 应用补丁
-          cd Source
-
-          # 4.1 sftp.cpp
-          sed -i '21i#define MAX_SFTP_OUTGOING_SIZE 30000\n#define MAX_SFTP_READ_SIZE 30000' afs/sftp.cpp
-
-          # 4.2 Makefile (GTK2 → GTK3)
-          sed -i 's/`pkg-config --cflags gtk+-2.0`/`pkg-config --cflags gtk+-3.0`/' Makefile
-          sed -i 's/-isystem\/usr\/include\/gtk-2.0/-isystem\/usr\/include\/gtk-3.0/' Makefile
-
-          # 4.3 application.cpp (#error → #warning)
-          sed -i '243s/#error/#warning/' application.cpp
-
-          # 4.4 darkmode.cpp
-          if [ ! -f ../wx+/darkmode.cpp ]; then
-              echo "Error: ../wx+/darkmode.cpp not found"
+          # 确定构建目录（包含 Makefile 的目录）
+          if [ -f "Source/Makefile" ]; then
+              BUILD_DIR="Source"
+          elif [ -f "Makefile" ]; then
+              BUILD_DIR="."
+          else
+              echo "Error: Cannot find Makefile"
               exit 1
           fi
-          sed -i '63s/globalDefaultThemeIsDark = wxSystemSettings::GetAppearance().AreAppsDark();/globalDefaultThemeIsDark = false;/' ../wx+/darkmode.cpp
-          sed -i '96,99d' ../wx+/darkmode.cpp
+          echo "Build directory: $BUILD_DIR"
+
+          # 应用补丁（使用绝对路径，避免目录切换问题）
+          # 4.1 sftp.cpp
+          if [ -f "$REPO_ROOT/Source/afs/sftp.cpp" ]; then
+              sed -i '21i#define MAX_SFTP_OUTGOING_SIZE 30000\n#define MAX_SFTP_READ_SIZE 30000' "$REPO_ROOT/Source/afs/sftp.cpp"
+          elif [ -f "$REPO_ROOT/afs/sftp.cpp" ]; then
+              sed -i '21i#define MAX_SFTP_OUTGOING_SIZE 30000\n#define MAX_SFTP_READ_SIZE 30000' "$REPO_ROOT/afs/sftp.cpp"
+          else
+              echo "Warning: afs/sftp.cpp not found, skipping"
+          fi
+
+          # 4.2 Makefile (GTK2 → GTK3)
+          if [ -f "$REPO_ROOT/$BUILD_DIR/Makefile" ]; then
+              sed -i 's/`pkg-config --cflags gtk+-2.0`/`pkg-config --cflags gtk+-3.0`/' "$REPO_ROOT/$BUILD_DIR/Makefile"
+              sed -i 's/-isystem\/usr\/include\/gtk-2.0/-isystem\/usr\/include\/gtk-3.0/' "$REPO_ROOT/$BUILD_DIR/Makefile"
+          else
+              echo "Warning: Makefile not found in $BUILD_DIR, skipping GTK3 change"
+          fi
+
+          # 4.3 application.cpp
+          if [ -f "$REPO_ROOT/Source/application.cpp" ]; then
+              sed -i '243s/#error/#warning/' "$REPO_ROOT/Source/application.cpp"
+          elif [ -f "$REPO_ROOT/application.cpp" ]; then
+              sed -i '243s/#error/#warning/' "$REPO_ROOT/application.cpp"
+          else
+              echo "Warning: application.cpp not found, skipping"
+          fi
+
+          # 4.4 darkmode.cpp
+          if [ -f "$REPO_ROOT/wx+/darkmode.cpp" ]; then
+              sed -i '63s/globalDefaultThemeIsDark = wxSystemSettings::GetAppearance().AreAppsDark();/globalDefaultThemeIsDark = false;/' "$REPO_ROOT/wx+/darkmode.cpp"
+              sed -i '96,99d' "$REPO_ROOT/wx+/darkmode.cpp"
+          else
+              echo "Warning: wx+/darkmode.cpp not found, skipping"
+          fi
 
           # 4.5 darkmode.h
-          sed -i '12i#include <wx/settings.h>' ../wx+/darkmode.h
-          sed -i '29r /dev/stdin' ../wx+/darkmode.h << 'EOL'
+          if [ -f "$REPO_ROOT/wx+/darkmode.h" ]; then
+              sed -i '12i#include <wx/settings.h>' "$REPO_ROOT/wx+/darkmode.h"
+              sed -i '29r /dev/stdin' "$REPO_ROOT/wx+/darkmode.h" << 'EOL'
           struct wxColorHook
           {
               virtual ~wxColorHook() {}
@@ -131,14 +158,28 @@ jobs:
               }
           };
           EOL
+          else
+              echo "Warning: wx+/darkmode.h not found, skipping"
+          fi
 
           # 4.6 gdrive.cpp (可选，留空)
+          # 如需 Google Drive 支持，请在此填入凭据
 
-          # 编译
+          # 进入构建目录并编译
+          cd "$REPO_ROOT/$BUILD_DIR"
           make -j$(nproc)
 
-          # 定位二进制
-          cd ../../Build/Bin
+          # 定位二进制文件（通常在 ../Build/Bin 或 Build/Bin）
+          cd "$REPO_ROOT"
+          if [ -d "Build/Bin" ]; then
+              cd Build/Bin
+          elif [ -d "../Build/Bin" ]; then
+              cd ../Build/Bin
+          else
+              echo "Error: Build/Bin directory not found"
+              exit 1
+          fi
+
           if [ -f FreeFileSync_aarch64 ]; then
               BIN_SRC="FreeFileSync_aarch64"
           elif [ -f FreeFileSync_armhf ]; then
