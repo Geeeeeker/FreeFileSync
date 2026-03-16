@@ -79,12 +79,11 @@ jobs:
 
       - name: Clone FreeFileSync (version14) and apply patches
         run: |
-          # 删除可能存在的旧目录
           rm -rf FreeFileSync
           git clone --branch version14 https://github.com/Geeeeeker/FreeFileSync.git
           cd FreeFileSync
 
-          # 从 version13 分支下载缺失的 warn_static.h 文件
+          # 下载缺失的 warn_static.h
           echo "Downloading missing warn_static.h from version13 branch..."
           mkdir -p zen
           wget -q -O zen/warn_static.h https://raw.githubusercontent.com/Geeeeeker/FreeFileSync/version13/zen/warn_static.h
@@ -98,16 +97,22 @@ jobs:
           echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
           echo "REPO_ROOT=$(pwd)" >> $GITHUB_ENV
 
-          # 应用补丁（使用 find 定位文件）
+          # 应用补丁：sftp.cpp
           SFTP_CPP=$(find . -path "*/afs/sftp.cpp" -type f | head -n 1)
           [ -n "$SFTP_CPP" ] && sed -i '21i#define MAX_SFTP_OUTGOING_SIZE 30000\n#define MAX_SFTP_READ_SIZE 30000' "$SFTP_CPP"
 
           # Makefile GTK3 修改
           [ -f "$BUILD_DIR/Makefile" ] && sed -i 's/`pkg-config --cflags gtk+-2.0`/`pkg-config --cflags gtk+-3.0`/; s/-isystem\/usr\/include\/gtk-2.0/-isystem\/usr\/include\/gtk-3.0/' "$BUILD_DIR/Makefile"
 
+          # application.cpp：将 #error 改为 #warning（基于内容，而非行号）
           APP_CPP=$(find . -name application.cpp -type f | head -n 1)
-          [ -n "$APP_CPP" ] && sed -i '243s/#error/#warning/' "$APP_CPP"
+          if [ -n "$APP_CPP" ]; then
+            sed -i 's/#error why is wxWidgets uncaught exception handling enabled!?/#warning why is wxWidgets uncaught exception handling enabled!?/' "$APP_CPP"
+          else
+            echo "Warning: application.cpp not found"
+          fi
 
+          # darkmode.cpp 补丁
           DARKMODE_CPP=$(find . -path "*/wx+/darkmode.cpp" -type f | head -n 1)
           if [ -n "$DARKMODE_CPP" ]; then
             sed -i '63s/globalDefaultThemeIsDark = wxSystemSettings::GetAppearance().AreAppsDark();/globalDefaultThemeIsDark = false;/' "$DARKMODE_CPP"
