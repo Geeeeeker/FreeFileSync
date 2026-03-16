@@ -79,9 +79,11 @@ jobs:
 
       - name: Clone FreeFileSync (version14) and apply patches
         run: |
+          # 删除可能存在的旧目录，防止 clone 失败
+          rm -rf FreeFileSync
           git clone --branch version14 https://github.com/Geeeeeker/FreeFileSync.git
           cd FreeFileSync
-          
+
           # 查找 Makefile 位置
           BUILD_DIR=$(dirname $(find . -name Makefile -type f | head -n 1))
           echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
@@ -120,11 +122,13 @@ jobs:
           if [ -z "$BIN_PATH" ]; then echo "Binary not found"; exit 1; fi
           cp "$BIN_PATH" "FreeFileSync_$ARCH"
           zip "FreeFileSync_$ARCH.zip" "FreeFileSync_$ARCH"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: FreeFileSync_${{ env.ARCH }}
           path: FreeFileSync_${{ env.ARCH }}.zip
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
