@@ -1,4 +1,4 @@
-name: Build FreeFileSync (Final Version)
+name: Build FreeFileSync (Final Version with warn_static.h fix)
 
 on:
   workflow_dispatch:
@@ -79,10 +79,19 @@ jobs:
 
       - name: Clone FreeFileSync (version14) and apply patches
         run: |
-          # 删除可能存在的旧目录，防止 clone 失败
+          # 删除可能存在的旧目录
           rm -rf FreeFileSync
           git clone --branch version14 https://github.com/Geeeeeker/FreeFileSync.git
           cd FreeFileSync
+
+          # 从 version13 分支下载缺失的 warn_static.h 文件
+          echo "Downloading missing warn_static.h from version13 branch..."
+          mkdir -p zen
+          wget -q -O zen/warn_static.h https://raw.githubusercontent.com/Geeeeeker/FreeFileSync/version13/zen/warn_static.h
+          if [ ! -f zen/warn_static.h ]; then
+            echo "Error: Failed to download warn_static.h"
+            exit 1
+          fi
 
           # 查找 Makefile 位置
           BUILD_DIR=$(dirname $(find . -name Makefile -type f | head -n 1))
