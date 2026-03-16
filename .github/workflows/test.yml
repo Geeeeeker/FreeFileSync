@@ -1,4 +1,4 @@
-name: Build FreeFileSync (Native/Cross Compile)
+name: Build FreeFileSync (Final Version)
 
 on:
   workflow_dispatch:
@@ -15,186 +15,120 @@ on:
           - i386
 
 jobs:
-  build-amd64:
-    if: github.event.inputs.arch == 'amd64'
-    runs-on: ubuntu-latest
+  build:
+    name: Build for ${{ github.event.inputs.arch }}
+    runs-on: ${{ github.event.inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     env:
-      TARGET_TRIPLE: x86_64-linux-gnu
-      CROSS: false
+      ARCH: ${{ github.event.inputs.arch }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y wget unzip bzip2 make g++ pkg-config \
-            libgtk-3-dev libssl-dev libpsl-dev libidn2-dev patch git
-      - name: Build libssh2
-        run: .github/scripts/build-libssh2.sh
-      - name: Build libcurl
-        run: .github/scripts/build-libcurl.sh
-      - name: Build wxWidgets
-        run: .github/scripts/build-wxwidgets.sh
-      - name: Clone and patch FreeFileSync
-        run: .github/scripts/patch-ffs.sh
-      - name: Build FreeFileSync
-        run: .github/scripts/build-ffs.sh
-      - name: Package binary
-        run: .github/scripts/package.sh
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeFileSync_amd64
-          path: FreeFileSync_amd64.zip
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_id }}-amd64
-          name: FreeFileSync amd64 (build #${{ github.run_number }})
-          body: |
-            **Architecture**: amd64
-            **Commit**: ${{ github.sha }}
-            **Run ID**: ${{ github.run_id }}
-          draft: false
-          prerelease: true
-          files: FreeFileSync_amd64.zip
 
-  build-arm64:
-    if: github.event.inputs.arch == 'arm64'
-    runs-on: ubuntu-24.04-arm   # GitHub 官方 ARM64 运行器
-    env:
-      TARGET_TRIPLE: aarch64-linux-gnu
-      CROSS: false
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
+      - name: Install dependencies (Native/Cross)
         run: |
           sudo apt update
-          sudo apt install -y wget unzip bzip2 make g++ pkg-config \
-            libgtk-3-dev libssl-dev libpsl-dev libidn2-dev patch git
-      - name: Build libssh2
-        run: .github/scripts/build-libssh2.sh
-      - name: Build libcurl
-        run: .github/scripts/build-libcurl.sh
-      - name: Build wxWidgets
-        run: .github/scripts/build-wxwidgets.sh
-      - name: Clone and patch FreeFileSync
-        run: .github/scripts/patch-ffs.sh
-      - name: Build FreeFileSync
-        run: .github/scripts/build-ffs.sh
-      - name: Package binary
-        run: .github/scripts/package.sh
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeFileSync_arm64
-          path: FreeFileSync_arm64.zip
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_id }}-arm64
-          name: FreeFileSync arm64 (build #${{ github.run_number }})
-          body: |
-            **Architecture**: arm64
-            **Commit**: ${{ github.sha }}
-            **Run ID**: ${{ github.run_id }}
-          draft: false
-          prerelease: true
-          files: FreeFileSync_arm64.zip
+          case "$ARCH" in
+            amd64)
+              sudo apt install -y wget unzip bzip2 make g++ pkg-config libgtk-3-dev libssl-dev libpsl-dev libidn2-dev patch git
+              ;;
+            arm64)
+              sudo apt install -y wget unzip bzip2 make g++ pkg-config libgtk-3-dev libssl-dev libpsl-dev libidn2-dev patch git
+              ;;
+            armhf)
+              sudo apt install -y wget unzip bzip2 make pkg-config patch git g++-arm-linux-gnueabihf
+              sudo dpkg --add-architecture armhf
+              sudo apt update
+              sudo apt install -y libgtk-3-dev:armhf libssl-dev:armhf libpsl-dev:armhf libidn2-dev:armhf
+              ;;
+            i386)
+              sudo apt install -y wget unzip bzip2 make pkg-config patch git g++-multilib
+              sudo dpkg --add-architecture i386
+              sudo apt update
+              sudo apt install -y libgtk-3-dev:i386 libssl-dev:i386 libpsl-dev:i386 libidn2-dev:i386
+              ;;
+          esac
 
-  build-armhf:
-    if: github.event.inputs.arch == 'armhf'
-    runs-on: ubuntu-latest
-    env:
-      TARGET_TRIPLE: arm-linux-gnueabihf
-      CROSS: true
-      CC: arm-linux-gnueabihf-gcc
-      CXX: arm-linux-gnueabihf-g++
-      PKG_CONFIG_PATH: /usr/lib/arm-linux-gnueabihf/pkgconfig
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install cross-compilation dependencies
+      - name: Build external dependencies (libssh2, libcurl, wxWidgets)
         run: |
-          sudo apt update
-          sudo apt install -y wget unzip bzip2 make pkg-config patch git \
-            g++-arm-linux-gnueabihf
-          sudo dpkg --add-architecture armhf
-          sudo apt update
-          sudo apt install -y libgtk-3-dev:armhf libssl-dev:armhf libpsl-dev:armhf libidn2-dev:armhf
-      - name: Build libssh2
-        run: .github/scripts/build-libssh2.sh
-      - name: Build libcurl
-        run: .github/scripts/build-libcurl.sh
-      - name: Build wxWidgets
-        run: .github/scripts/build-wxwidgets.sh
-      - name: Clone and patch FreeFileSync
-        run: .github/scripts/patch-ffs.sh
-      - name: Build FreeFileSync
-        run: .github/scripts/build-ffs.sh
-      - name: Package binary
-        run: .github/scripts/package.sh
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeFileSync_armhf
-          path: FreeFileSync_armhf.zip
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_id }}-armhf
-          name: FreeFileSync armhf (build #${{ github.run_number }})
-          body: |
-            **Architecture**: armhf
-            **Commit**: ${{ github.sha }}
-            **Run ID**: ${{ github.run_id }}
-          draft: false
-          prerelease: true
-          files: FreeFileSync_armhf.zip
+          # libssh2
+          wget -q https://libssh2.org/download/libssh2-1.11.1.tar.gz
+          tar xzf libssh2-1.11.1.tar.gz
+          cd libssh2-1.11.1
+          mkdir build && cd build
+          case "$ARCH" in armhf) HOST=--host=arm-linux-gnueabihf ;; i386) HOST=--host=i686-linux-gnu ;; *) HOST= ;; esac
+          ../configure $HOST
+          make -j$(nproc) && sudo make install
+          cd ../..
 
-  build-i386:
-    if: github.event.inputs.arch == 'i386'
-    runs-on: ubuntu-latest
-    env:
-      TARGET_TRIPLE: i686-linux-gnu
-      CROSS: true
-      CC: gcc -m32
-      CXX: g++ -m32
-      PKG_CONFIG_PATH: /usr/lib/i386-linux-gnu/pkgconfig
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install cross-compilation dependencies
+          # libcurl
+          wget -q https://curl.se/download/curl-8.15.0.tar.gz
+          tar xzf curl-8.15.0.tar.gz
+          cd curl-8.15.0
+          mkdir build && cd build
+          ../configure $HOST --with-openssl --with-libssh2 --enable-versioned-symbols
+          make -j$(nproc) && sudo make install
+          cd ../..
+
+          # wxWidgets
+          wget -q https://github.com/wxWidgets/wxWidgets/releases/download/v3.3.1/wxWidgets-3.3.1.tar.bz2
+          tar xjf wxWidgets-3.3.1.tar.bz2
+          cd wxWidgets-3.3.1
+          mkdir gtk-build && cd gtk-build
+          ../configure $HOST --disable-shared
+          make -j$(nproc) && sudo make install
+          cd ../..
+
+      - name: Clone FreeFileSync (version14) and apply patches
         run: |
-          sudo apt update
-          sudo apt install -y wget unzip bzip2 make pkg-config patch git \
-            g++-multilib
-          sudo dpkg --add-architecture i386
-          sudo apt update
-          sudo apt install -y libgtk-3-dev:i386 libssl-dev:i386 libpsl-dev:i386 libidn2-dev:i386
-      - name: Build libssh2
-        run: .github/scripts/build-libssh2.sh
-      - name: Build libcurl
-        run: .github/scripts/build-libcurl.sh
-      - name: Build wxWidgets
-        run: .github/scripts/build-wxwidgets.sh
-      - name: Clone and patch FreeFileSync
-        run: .github/scripts/patch-ffs.sh
+          git clone --branch version14 https://github.com/Geeeeeker/FreeFileSync.git
+          cd FreeFileSync
+          
+          # 查找 Makefile 位置
+          BUILD_DIR=$(dirname $(find . -name Makefile -type f | head -n 1))
+          echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
+          echo "REPO_ROOT=$(pwd)" >> $GITHUB_ENV
+
+          # 应用补丁（使用 find 定位文件）
+          SFTP_CPP=$(find . -path "*/afs/sftp.cpp" -type f | head -n 1)
+          [ -n "$SFTP_CPP" ] && sed -i '21i#define MAX_SFTP_OUTGOING_SIZE 30000\n#define MAX_SFTP_READ_SIZE 30000' "$SFTP_CPP"
+
+          # Makefile GTK3 修改
+          [ -f "$BUILD_DIR/Makefile" ] && sed -i 's/`pkg-config --cflags gtk+-2.0`/`pkg-config --cflags gtk+-3.0`/; s/-isystem\/usr\/include\/gtk-2.0/-isystem\/usr\/include\/gtk-3.0/' "$BUILD_DIR/Makefile"
+
+          APP_CPP=$(find . -name application.cpp -type f | head -n 1)
+          [ -n "$APP_CPP" ] && sed -i '243s/#error/#warning/' "$APP_CPP"
+
+          DARKMODE_CPP=$(find . -path "*/wx+/darkmode.cpp" -type f | head -n 1)
+          if [ -n "$DARKMODE_CPP" ]; then
+            sed -i '63s/globalDefaultThemeIsDark = wxSystemSettings::GetAppearance().AreAppsDark();/globalDefaultThemeIsDark = false;/' "$DARKMODE_CPP"
+            sed -i '96,99d' "$DARKMODE_CPP"
+          fi
+
       - name: Build FreeFileSync
-        run: .github/scripts/build-ffs.sh
-      - name: Package binary
-        run: .github/scripts/package.sh
+        run: |
+          cd $REPO_ROOT/$BUILD_DIR
+          if [ "$ARCH" = "armhf" ]; then
+            make CC=arm-linux-gnueabihf-gcc CXX=arm-linux-gnueabihf-g++ -j$(nproc)
+          elif [ "$ARCH" = "i386" ]; then
+            make CC="gcc -m32" CXX="g++ -m32" -j$(nproc)
+          else
+            make -j$(nproc)
+          fi
+
+      - name: Package and Release
+        run: |
+          BIN_PATH=$(find $REPO_ROOT -name "FreeFileSync_*" -type f | head -n 1 || find $REPO_ROOT -name "FreeFileSync" -type f | head -n 1)
+          if [ -z "$BIN_PATH" ]; then echo "Binary not found"; exit 1; fi
+          cp "$BIN_PATH" "FreeFileSync_$ARCH"
+          zip "FreeFileSync_$ARCH.zip" "FreeFileSync_$ARCH"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FreeFileSync_i386
-          path: FreeFileSync_i386.zip
+          name: FreeFileSync_${{ env.ARCH }}
+          path: FreeFileSync_${{ env.ARCH }}.zip
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_id }}-i386
-          name: FreeFileSync i386 (build #${{ github.run_number }})
-          body: |
-            **Architecture**: i386
-            **Commit**: ${{ github.sha }}
-            **Run ID**: ${{ github.run_id }}
-          draft: false
+          tag_name: build-${{ github.run_id }}-${{ env.ARCH }}
+          name: FreeFileSync ${{ env.ARCH }} (build #${{ github.run_number }})
           prerelease: true
-          files: FreeFileSync_i386.zip
+          files: FreeFileSync_${{ env.ARCH }}.zip
