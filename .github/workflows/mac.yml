@@ -1,4 +1,4 @@
-name: Build FreeFileSync (Single Architecture)
+name: Build FreeFileSync (Cross-Compile for ARM)
 
 on:
   workflow_dispatch:
@@ -6,13 +6,11 @@ on:
       arch:
         description: 'Target architecture'
         required: true
-        default: 'amd64'
+        default: 'arm64'
         type: choice
         options:
-          - amd64
           - arm64
           - arm
-          - i386
 
 jobs:
   build:
@@ -23,76 +21,134 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Create build script
+      # 根据选择的架构设置交叉编译变量
+      - name: Set architecture variables
+        id: vars
         run: |
-          cat > build.sh << 'EOF'
-          #!/bin/bash
-          set -e
+          case "${{ github.event.inputs.arch }}" in
+            arm64)
+              echo "ARCH=arm64" >> $GITHUB_OUTPUT
+              echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_OUTPUT
+              echo "HOST=aarch64-linux-gnu" >> $GITHUB_OUTPUT
+              echo "MULTIARCH=aarch64-linux-gnu" >> $GITHUB_OUTPUT
+              echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_OUTPUT
+              echo "DEB_ARCH=arm64" >> $GITHUB_OUTPUT
+              ;;
+            arm)
+              echo "ARCH=arm" >> $GITHUB_OUTPUT
+              echo "CROSS_COMPILE=arm-linux-gnueabihf-" >> $GITHUB_OUTPUT
+              echo "HOST=arm-linux-gnueabihf" >> $GITHUB_OUTPUT
+              echo "MULTIARCH=arm-linux-gnueabihf" >> $GITHUB_OUTPUT
+              echo "PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig" >> $GITHUB_OUTPUT
+              echo "DEB_ARCH=armhf" >> $GITHUB_OUTPUT
+              ;;
+          esac
 
-          if command -v sudo &> /dev/null; then
-              SUDO=sudo
-          else
-              SUDO=
-          fi
+      # 启用 multiarch 并添加正确的目标架构源（使用 ports.ubuntu.com）
+      - name: Enable multiarch and setup ports.ubuntu.com sources
+        run: |
+          sudo dpkg --add-architecture ${{ steps.vars.outputs.DEB_ARCH }}
+          sudo tee /etc/apt/sources.list.d/ports.list > /dev/null <<EOF
+          deb [arch=${{ steps.vars.outputs.DEB_ARCH }}] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
+          deb [arch=${{ steps.vars.outputs.DEB_ARCH }}] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
+          deb [arch=${{ steps.vars.outputs.DEB_ARCH }}] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
+          deb [arch=${{ steps.vars.outputs.DEB_ARCH }}] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
+          EOF
+          sudo apt update
 
-          $SUDO apt update
-          $SUDO apt install -y wget unzip bzip2 make g++ pkg-config libgtk-3-dev libssl-dev libpsl-dev libidn2-dev patch
+      # 安装交叉编译工具链和基础工具
+      - name: Install cross toolchain and tools
+        run: |
+          sudo apt install -y crossbuild-essential-${{ steps.vars.outputs.DEB_ARCH }} \
+            wget unzip bzip2 make pkg-config patch
 
-          # 构建 libssh2
+      # 安装目标架构的系统库（GTK3、OpenSSL 等）
+      - name: Install target libraries
+        run: |
+          sudo apt install -y \
+            libgtk-3-dev:${{ steps.vars.outputs.DEB_ARCH }} \
+            libssl-dev:${{ steps.vars.outputs.DEB_ARCH }} \
+            libpsl-dev:${{ steps.vars.outputs.DEB_ARCH }} \
+            libidn2-dev:${{ steps.vars.outputs.DEB_ARCH }}
+
+      # 创建安装前缀，用于存放交叉编译的依赖库
+      - name: Create installation prefix
+        run: mkdir -p $HOME/install/${{ steps.vars.outputs.HOST }}
+
+      # 交叉编译 libssh2
+      - name: Build libssh2
+        run: |
           wget https://libssh2.org/download/libssh2-1.11.1.tar.gz
           tar xzf libssh2-1.11.1.tar.gz
           cd libssh2-1.11.1
           mkdir build && cd build
-          ../configure
+          ../configure --host=${{ steps.vars.outputs.HOST }} \
+            --prefix=$HOME/install/${{ steps.vars.outputs.HOST }} \
+            CC=${{ steps.vars.outputs.CROSS_COMPILE }}gcc \
+            CXX=${{ steps.vars.outputs.CROSS_COMPILE }}g++ \
+            PKG_CONFIG_PATH=${{ steps.vars.outputs.PKG_CONFIG_PATH }}
           make -j$(nproc)
-          $SUDO make install
-          $SUDO cp /usr/local/lib/libssh2.so.1.0.1 /usr/lib/$(gcc -dumpmachine)/ 2>/dev/null || true
-          $SUDO ldconfig
+          make install
           cd ../..
 
-          # 构建 libcurl
+      # 交叉编译 libcurl（需要找到 libssh2 和 OpenSSL）
+      - name: Build libcurl
+        run: |
+          export PKG_CONFIG_PATH=$HOME/install/${{ steps.vars.outputs.HOST }}/lib/pkgconfig:${{ steps.vars.outputs.PKG_CONFIG_PATH }}
           wget https://curl.se/download/curl-8.15.0.tar.gz
           tar xzf curl-8.15.0.tar.gz
           cd curl-8.15.0
           mkdir build && cd build
-          ../configure --with-openssl --with-libssh2 --enable-versioned-symbols
+          ../configure --host=${{ steps.vars.outputs.HOST }} \
+            --prefix=$HOME/install/${{ steps.vars.outputs.HOST }} \
+            --with-openssl \
+            CC=${{ steps.vars.outputs.CROSS_COMPILE }}gcc \
+            CXX=${{ steps.vars.outputs.CROSS_COMPILE }}g++ \
+            PKG_CONFIG_PATH=$PKG_CONFIG_PATH
           make -j$(nproc)
-          $SUDO make install
-          $SUDO cp /usr/local/lib/libcurl.so.4.8.0 /usr/lib/$(gcc -dumpmachine)/ 2>/dev/null || true
-          $SUDO ldconfig
+          make install
           cd ../..
 
-          # 构建 wxWidgets
+      # 交叉编译 wxWidgets（静态库）
+      - name: Build wxWidgets
+        run: |
+          export PKG_CONFIG_PATH=$HOME/install/${{ steps.vars.outputs.HOST }}/lib/pkgconfig:${{ steps.vars.outputs.PKG_CONFIG_PATH }}
           wget https://github.com/wxWidgets/wxWidgets/releases/download/v3.3.1/wxWidgets-3.3.1.tar.bz2
           tar xjf wxWidgets-3.3.1.tar.bz2
           cd wxWidgets-3.3.1
           mkdir gtk-build && cd gtk-build
-          ../configure --disable-shared
+          ../configure --host=${{ steps.vars.outputs.HOST }} \
+            --prefix=$HOME/install/${{ steps.vars.outputs.HOST }} \
+            --disable-shared \
+            CC=${{ steps.vars.outputs.CROSS_COMPILE }}gcc \
+            CXX=${{ steps.vars.outputs.CROSS_COMPILE }}g++ \
+            PKG_CONFIG_PATH=$PKG_CONFIG_PATH
           make -j$(nproc)
-          $SUDO make install
+          make install
           cd ../..
 
-          # 下载 FreeFileSync 源码（使用 GitHub raw 链接）
+      # 下载 FreeFileSync 源码（使用 GitHub raw 链接）
+      - name: Download FreeFileSync source
+        run: |
           wget https://github.com/Geeeeeker/FreeFileSync/raw/master/FreeFileSync/FreeFileSync_14.4_Source.zip
-          unzip FreeFileSync_14.4_Source.zip
+          # 删除已存在的目录以避免 unzip 交互询问
+          rm -rf FreeFileSync
+          unzip -o FreeFileSync_14.4_Source.zip
 
-          # 应用补丁
+      # 应用原文档中的所有补丁
+      - name: Apply patches
+        run: |
           cd FreeFileSync/Source
-
           # 4.1 sftp.cpp
           sed -i '21i#define MAX_SFTP_OUTGOING_SIZE 30000\n#define MAX_SFTP_READ_SIZE 30000' afs/sftp.cpp
-
           # 4.2 Makefile (GTK2 → GTK3)
           sed -i 's/`pkg-config --cflags gtk+-2.0`/`pkg-config --cflags gtk+-3.0`/' Makefile
           sed -i 's/-isystem\/usr\/include\/gtk-2.0/-isystem\/usr\/include\/gtk-3.0/' Makefile
-
-          # 4.3 application.cpp (#error → #warning)
+          # 4.3 application.cpp
           sed -i '243s/#error/#warning/' application.cpp
-
           # 4.4 darkmode.cpp
           sed -i '63s/globalDefaultThemeIsDark = wxSystemSettings::GetAppearance().AreAppsDark();/globalDefaultThemeIsDark = false;/' ../wx+/darkmode.cpp
           sed -i '96,99d' ../wx+/darkmode.cpp
-
           # 4.5 darkmode.h
           sed -i '12i#include <wx/settings.h>' ../wx+/darkmode.h
           sed -i '29r /dev/stdin' ../wx+/darkmode.h << 'EOL'
@@ -120,65 +176,44 @@ jobs:
           };
           EOL
 
-          # 4.6 gdrive.cpp (可选，留空)
-
-          # 编译
+      # 交叉编译 FreeFileSync 本体
+      - name: Build FreeFileSync
+        run: |
+          cd FreeFileSync/Source
+          export PKG_CONFIG_PATH=$HOME/install/${{ steps.vars.outputs.HOST }}/lib/pkgconfig:${{ steps.vars.outputs.PKG_CONFIG_PATH }}
+          export CFLAGS="-I$HOME/install/${{ steps.vars.outputs.HOST }}/include"
+          export CXXFLAGS="-I$HOME/install/${{ steps.vars.outputs.HOST }}/include"
+          export LDFLAGS="-L$HOME/install/${{ steps.vars.outputs.HOST }}/lib -Wl,-rpath-link,$HOME/install/${{ steps.vars.outputs.HOST }}/lib"
+          export CC=${{ steps.vars.outputs.CROSS_COMPILE }}gcc
+          export CXX=${{ steps.vars.outputs.CROSS_COMPILE }}g++
           make -j$(nproc)
 
-          # 定位二进制
-          cd ../../Build/Bin
+      # 定位生成的二进制并打包
+      - name: Locate binary and prepare archive
+        run: |
+          cd FreeFileSync/Build/Bin
           if [ -f FreeFileSync_aarch64 ]; then
-              BIN_SRC="FreeFileSync_aarch64"
+            BIN=FreeFileSync_aarch64
           elif [ -f FreeFileSync_armhf ]; then
-              BIN_SRC="FreeFileSync_armhf"
-          elif [ -f FreeFileSync_i386 ]; then
-              BIN_SRC="FreeFileSync_i386"
-          elif [ -f FreeFileSync_amd64 ]; then
-              BIN_SRC="FreeFileSync_amd64"
+            BIN=FreeFileSync_armhf
           else
-              echo "Could not find FreeFileSync binary"
-              exit 1
+            echo "Binary not found"
+            exit 1
           fi
-          cp "$BIN_SRC" /workspace/FreeFileSync_binary
-          EOF
-          chmod +x build.sh
+          cp $BIN FreeFileSync_${{ github.event.inputs.arch }}
+          mkdir -p ${{ github.workspace }}/output
+          cp FreeFileSync_${{ github.event.inputs.arch }} ${{ github.workspace }}/output/
+          cd ${{ github.workspace }}/output
+          zip FreeFileSync_${{ github.event.inputs.arch }}.zip FreeFileSync_${{ github.event.inputs.arch }}
 
-      - name: Set up QEMU
-        if: github.event.inputs.arch != 'amd64'
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build for amd64 (native)
-        if: github.event.inputs.arch == 'amd64'
-        run: ./build.sh
-
-      - name: Build for ${{ github.event.inputs.arch }} (via Docker)
-        if: github.event.inputs.arch != 'amd64'
-        run: |
-          case "${{ github.event.inputs.arch }}" in
-            arm64) PLATFORM=linux/arm64 ;;
-            arm)   PLATFORM=linux/arm/v7 ;;
-            i386)  PLATFORM=linux/386 ;;
-          esac
-          docker run --rm \
-            --platform $PLATFORM \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            ubuntu:24.04 \
-            bash -c "./build.sh"
-
-      - name: Prepare ZIP archive
-        run: |
-          mkdir -p output
-          cp FreeFileSync_binary output/FreeFileSync_${{ github.event.inputs.arch }}
-          cd output
-          zip ../FreeFileSync_${{ github.event.inputs.arch }}.zip FreeFileSync_${{ github.event.inputs.arch }}
-
+      # 上传构建产物（Artifact）
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: FreeFileSync_${{ github.event.inputs.arch }}
-          path: FreeFileSync_${{ github.event.inputs.arch }}.zip
+          path: output/FreeFileSync_${{ github.event.inputs.arch }}.zip
 
+      # 创建预发布版本并上传 ZIP
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -191,4 +226,4 @@ jobs:
             **Build Date**: ${{ github.event.repository.updated_at }}
           draft: false
           prerelease: true
-          files: FreeFileSync_${{ github.event.inputs.arch }}.zip
+          files: output/FreeFileSync_${{ github.event.inputs.arch }}.zip
